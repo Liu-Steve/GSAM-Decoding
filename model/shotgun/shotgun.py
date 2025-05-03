@@ -6,7 +6,6 @@ from transformers.generation.utils import _crop_past_key_values
 
 
 def find_candidate_tokens(input_ids):
-    return None
     return np.array([
         [0, 0, 0],
         [0, 0, 0],
@@ -41,13 +40,13 @@ def make_4d_attention_mask(
     For cached_prefix_len=2, uncached_prefix_len=3, draft_lens=[2,3], the resulting mask will have
     shape (1, 1, 8, 10) with values:
     ```
-    [[[[ 1.    1.    1.    .     .     .     .     .     .     .]   # uncached prefix row 0 
-       [ 1.    1.    1.    1.    .     .     .     .     .     .]   # uncached prefix row 1
-       [ 1.    1.    1.    1.    1.    .     .     .     .     .]   # uncached prefix row 2
-       [ 1.    1.    1.    1.    1.    1.    .     .     .     .]   # draft 1 row 0
-       [ 1.    1.    1.    1.    1.    1.    1.    .     .     .]   # draft 1 row 1  
-       [ 1.    1.    1.    1.    1.    .     .     1.    .     .]   # draft 2 row 0
-       [ 1.    1.    1.    1.    1.    .     .     1.    1.    .]   # draft 2 row 1
+    [[[[ 1.    1.    1.    .     .     .     .     .     .     .]     # uncached prefix row 0 
+       [ 1.    1.    1.    1.    .     .     .     .     .     .]     # uncached prefix row 1
+       [ 1.    1.    1.    1.    1.    .     .     .     .     .]     # uncached prefix row 2
+       [ 1.    1.    1.    1.    1.    1.    .     .     .     .]     # draft 1 row 0
+       [ 1.    1.    1.    1.    1.    1.    1.    .     .     .]     # draft 1 row 1  
+       [ 1.    1.    1.    1.    1.    .     .     1.    .     .]     # draft 2 row 0
+       [ 1.    1.    1.    1.    1.    .     .     1.    1.    .]     # draft 2 row 1
        [ 1.    1.    1.    1.    1.    .     .     1.    1.    1.]]]] # draft 2 row 2
        | cached   |    uncached     |  draft 1   |    draft 2     |
        | prefix   |     prefix      |            |                |
@@ -66,37 +65,39 @@ def make_4d_attention_mask(
     cols = seqs[None, :] # shape (1, query_len)
 
     # Compute the *end* boundaries of each segment: [P, P+D1, P+D1+D2, ...].
-    ends = np.cumsum([uncached_prefix_len] + draft_lens)
+    query_lens = [uncached_prefix_len] + draft_lens
+    ends = np.cumsum(query_lens)
 
     # segment_id[i] = which chunk row i belongs to:
     # prefix rows [0..P-1] -> 0
     # draft k rows [ ends[k-1] .. ends[k]-1 ] -> k
-    segment_id = np.searchsorted(ends, rows[:, 0], side="right")
-    segment_id = segment_id[:, None]  # back to (query_len, 1)
+    segment_id = np.repeat(np.arange(len(ends)), query_lens)
+    segment_id = segment_id[:, None]  # shape (query_len, 1)
 
     # Compute the *start* of each segment similarly:
     # starts = [0, P, P+D1, ...]
     starts = np.concatenate(([0], ends[:-1]))
-    seg_start = starts[segment_id]          # shape (query_len, 1)
+    seg_start = starts[segment_id]    # shape (query_len, 1)
 
     # Draft-region mask:
     #   allow all cols < prefix_len,
     #   plus cols in [ seg_start .. i ] (i.e. its own draft-causal)
-    mask = (cols <= rows) & ((cols < uncached_prefix_len) | (cols >= seg_start))
-    attn_mask = np.empty((query_len, total_len), dtype=dtype)
-    attn_mask[:, :cached_prefix_len] = 1.0
-    attn_mask[:, cached_prefix_len:][mask] = 1.0
-    attn_mask[:, cached_prefix_len:][~mask] = 0.0
+    draft_mask = (cols <= rows) & ((cols < uncached_prefix_len) | (cols >= seg_start))
 
-    return attn_mask.astype(dtype).reshape((1, 1, query_len, total_len))
+    # Full attention mask:
+    mask = np.empty((query_len, total_len), dtype=dtype)
+    mask[:, :cached_prefix_len] = 1.0
+    mask[:, cached_prefix_len:] = draft_mask.astype(dtype)
+
+    return mask.astype(dtype).reshape((1, 1, query_len, total_len))
 
 
 @torch.no_grad()
 def shotgun(
-    model,
+    model: torch.nn.Module,
     input_ids: torch.LongTensor,
-    max_length,
-    eos_token_id,
+    max_length: int,
+    eos_token_id: int,
     **model_kwargs,
 ):
     device = input_ids.device

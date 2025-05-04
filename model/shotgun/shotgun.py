@@ -4,12 +4,23 @@ from itertools import count
 
 from transformers.generation.utils import _crop_past_key_values
 
+from model.shotgun.lru_cache import ShotgunCache
 
-def find_candidate_tokens(input_ids):
-    return np.array([
-        [0, 0, 0],
-        [0, 0, 0],
-    ])
+
+def get_draft_tokens(input_ids: np.ndarray, shotgun_cache: ShotgunCache):
+    key = input_ids[-shotgun_cache.max_key_token_len:]
+    drafts = shotgun_cache.get_draft_tokens(key)
+
+    if not drafts:
+        return np.array([[]], dtype=input_ids.dtype)
+
+    num_drafts = len(drafts)
+    draft_len = max(len(draft) for draft in drafts)
+
+    draft_matrix = np.zeros((num_drafts, draft_len), dtype=input_ids.dtype)
+    for i, draft in enumerate(drafts):
+        draft_matrix[i, :len(draft)] = draft
+    return draft_matrix
 
 
 def make_4d_attention_mask(
@@ -98,6 +109,7 @@ def shotgun(
     input_ids: torch.LongTensor,
     max_length: int,
     eos_token_id: int,
+    shotgun_cache: ShotgunCache,
     **model_kwargs,
 ):
     device = input_ids.device
@@ -112,9 +124,7 @@ def shotgun(
 
     for step in count():
         # Query the cache table to get the draft tokens.
-        drafts = find_candidate_tokens(input_ids)
-        if drafts is None:
-            drafts = np.array([[]], dtype=prefix_ids.dtype)
+        drafts = get_draft_tokens(prefix_ids, shotgun_cache)
         num_drafts = drafts.shape[0]
         draft_len = drafts.shape[1]
         sum_draft_len = num_drafts * draft_len

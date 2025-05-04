@@ -8,9 +8,19 @@ from transformers import StoppingCriteriaList, MaxLengthCriteria
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from model.shotgun.shotgun import shotgun
+from model.shotgun.lru_cache import ShotgunCache, ShotgunCacheConfig
 
 def shotgun_forward(inputs, model, tokenizer, max_new_tokens):
     input_ids = inputs.input_ids
+
+    shotgun_cache = ShotgunCache([
+        ShotgunCacheConfig(
+            key_capacity=65536,
+            value_capacity=8,
+            key_token_len=2,
+            value_token_len=2,
+        )
+    ])
 
     output_ids, step, accept_length_list = shotgun(
         model,
@@ -18,6 +28,7 @@ def shotgun_forward(inputs, model, tokenizer, max_new_tokens):
         max_length=len(input_ids[0])+max_new_tokens,
         pad_token_id=tokenizer.pad_token_id,
         eos_token_id=tokenizer.eos_token_id,
+        shotgun_cache=shotgun_cache,
     )
 
     input_len = len(input_ids[0])

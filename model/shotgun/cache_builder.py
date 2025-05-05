@@ -17,7 +17,7 @@ _FAST_PRAGMAS = """
     PRAGMA cache_size   = -1048576;          -- 1 GiB page cache (negative -> KiB)
 """
 
-def _generate_schema_p1(key_len: int) -> str:
+def _generate_schema_cnt_ngram(key_len: int) -> str:
     """Generate kgram_counts schema SQL with dynamic key length."""
     cols = [f"k{i+1} INTEGER NOT NULL" for i in range(key_len)]
     pk_cols = ", ".join(f"k{i+1}" for i in range(key_len))
@@ -29,7 +29,7 @@ CREATE TABLE IF NOT EXISTS kgram_counts (
 );
 """
 
-def _generate_schema_p2(key_len: int, val_len: int) -> str:
+def _generate_schema_cnt_followup(key_len: int, val_len: int) -> str:
     """Generate follow_counts schema SQL with dynamic key and value length."""
     prefix_cols = [f"p{i+1} INTEGER NOT NULL" for i in range(key_len)]
     suffix_cols = [f"s{i+1} INTEGER NOT NULL" for i in range(val_len)]
@@ -88,7 +88,7 @@ def top_kgrams(N: int,
                db_path: str,
                key_len: int
     ) -> List[Tuple[Tuple[int, ...], int]]:
-    schema_sql = _generate_schema_p1(key_len)
+    schema_sql = _generate_schema_cnt_ngram(key_len)
     with _open_db(db_path, schema_sql) as conn:
         cur = conn.cursor()
         
@@ -109,7 +109,7 @@ def top_kgrams(N: int,
 
 def _count_followups(int_iter: Iterable[int],
                      k: int, v: int,
-                     top_prefixes: Sequence[Tuple[int, ...]],
+                     top_prefixes: set[Tuple[int, ...]],
                      conn: sqlite3.Connection,
                      batch: int = 100_000
     ) -> None:
@@ -124,7 +124,6 @@ def _count_followups(int_iter: Iterable[int],
     q = (f"INSERT INTO follow_counts({col_str}, cnt) VALUES({placeholders},1) "
          f"ON CONFLICT({pk_str}) DO UPDATE SET cnt = cnt + 1")
 
-    top_set = set(top_prefixes)
     win = deque(maxlen=k + v)
     todo: List[Tuple[int, ...]] = []
 
@@ -132,7 +131,7 @@ def _count_followups(int_iter: Iterable[int],
         win.append(x)
         if len(win) == k + v:
             prefix = tuple(itertools.islice(win, 0, k))
-            if prefix in top_set:
+            if prefix in top_prefixes:
                 suffix = tuple(itertools.islice(win, k, k + v))
                 todo.append((*prefix, *suffix))
                 if len(todo) >= batch:
@@ -149,7 +148,7 @@ def top_followups(int_iter: Iterable[int],
                   M: int,
                   db_path: str
                   ) -> Dict[Tuple[int, ...], List[Tuple[Tuple[int, ...], int]]]:
-    schema_sql = _generate_schema_p2(k, v)
+    schema_sql = _generate_schema_cnt_followup(k, v)
     conn = _open_db(db_path, schema_sql)
 
     # Build counts
@@ -225,7 +224,7 @@ def _merge_tables(target_db: str,
             cur.execute("DETACH DATABASE worker")
 
 
-def batch_iter(stream, batch_size):
+def _batch_iter(stream, batch_size):
     it = iter(stream)
     while True:
         batch = list(itertools.islice(it, batch_size))
@@ -234,7 +233,7 @@ def batch_iter(stream, batch_size):
         yield batch
 
 
-def construct_task(bit, num_workers):
+def _construct_data_for_tasks(bit, num_workers):
     tasks = []
     for wid in range(num_workers):
         try:
@@ -244,9 +243,9 @@ def construct_task(bit, num_workers):
         tasks.append((wid, batch))
     return tasks
 
-def process_batch(worker_id, batch, model_path, key_len, db_dir, dataset):
+def _count_ngram_worker(worker_id, batch, model_path, key_len, db_dir, dataset):
     db_path = os.path.join(db_dir, f"{dataset}_cnt_ngram_worker{worker_id}.sqlite")
-    schema_sql = _generate_schema_p1(key_len)
+    schema_sql = _generate_schema_cnt_ngram(key_len)
     with _open_db(db_path, schema_sql) as conn:
         tokenizer = AutoTokenizer.from_pretrained(model_path, use_fast=True, use_cache=False, model_max_length=2**20, legacy=True)
         for example in batch:
@@ -270,18 +269,18 @@ def build_ngram_counts(
     
     with mp.Pool(processes=num_workers) as pool:
         with tqdm(total=total_examples) as pbar:
-            bit = batch_iter(data_stream, thread_batch)
-            tasks = construct_task(bit, num_workers)
+            bit = _batch_iter(data_stream, thread_batch)
+            data_for_tasks = _construct_data_for_tasks(bit, num_workers)
             while True:
-                if not tasks:
+                if not data_for_tasks:
                     break
 
                 results = [
-                    pool.apply_async(process_batch, args=(wid, batch, model_path, key_len, db_dir, dataset))
-                    for wid, batch in tasks
+                    pool.apply_async(_count_ngram_worker, args=(wid, batch, model_path, key_len, db_dir, dataset))
+                    for wid, batch in data_for_tasks
                 ]
 
-                tasks = construct_task(bit, num_workers)
+                data_for_tasks = _construct_data_for_tasks(bit, num_workers)
 
                 for r in results:
                     count = r.get()
@@ -298,7 +297,7 @@ def merge_ngram_counts(db_dir: str, dataset: str, num_workers: int, key_len: int
     # Generate pk_cols string for the merge operation
     pk_cols = ", ".join(f"k{i+1}" for i in range(key_len))
     
-    schema_sql = _generate_schema_p1(key_len)
+    schema_sql = _generate_schema_cnt_ngram(key_len)
     _merge_tables(merged_db, worker_dbs, schema_sql,
                   table="kgram_counts", pk_cols=pk_cols)
 

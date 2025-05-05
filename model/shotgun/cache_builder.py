@@ -113,6 +113,7 @@ def _count_followups(int_iter: Iterable[int],
                      conn: sqlite3.Connection,
                      batch: int = 100_000
     ) -> None:
+    """Populate table `follow_counts` with counts of k-grams followed by v-grams."""
     # Generate dynamic column names and placeholders
     p_cols = [f"p{i+1}" for i in range(k)]
     s_cols = [f"s{i+1}" for i in range(v)]
@@ -141,23 +142,28 @@ def _count_followups(int_iter: Iterable[int],
         cur.executemany(q, todo)
 
 
-def top_followups(int_iter: Iterable[int],
+def top_followups(
                   k: int,
                   v: int,
                   prefixes: Sequence[Tuple[int, ...]],
                   M: int,
                   db_path: str
-                  ) -> Dict[Tuple[int, ...], List[Tuple[Tuple[int, ...], int]]]:
+    ) -> Dict[Tuple[int, ...], List[Tuple[Tuple[int, ...], int]]]:
+    """
+    Get the top M followups for each prefix from a pre-built database.
+    
+    Args:
+        k: Length of prefix
+        v: Length of suffix
+        prefixes: Sequence of prefixes to get followups for
+        M: Number of top followups to return per prefix
+        db_path: Path to the database containing followup counts
+        
+    Returns:
+        Dictionary mapping prefixes to lists of (suffix, count) pairs
+    """
     schema_sql = _generate_schema_cnt_followup(k, v)
     conn = _open_db(db_path, schema_sql)
-
-    # Build counts
-    _count_followups(
-        int_iter,
-        k, v,
-        prefixes,
-        conn
-    )
 
     # Fetch results
     cur = conn.cursor()
@@ -243,7 +249,14 @@ def _construct_data_for_tasks(bit, num_workers):
         tasks.append((wid, batch))
     return tasks
 
-def _count_ngram_worker(worker_id, batch, model_path, key_len, db_dir, dataset):
+def _count_ngram_worker(
+        worker_id: int,
+        batch: Iterable[Dict[str, Any]],
+        model_path: str,
+        key_len: int,
+        db_dir: str,
+        dataset: str,
+    ) -> int:
     db_path = os.path.join(db_dir, f"{dataset}_cnt_ngram_worker{worker_id}.sqlite")
     schema_sql = _generate_schema_cnt_ngram(key_len)
     with _open_db(db_path, schema_sql) as conn:
@@ -301,6 +314,82 @@ def merge_ngram_counts(db_dir: str, dataset: str, num_workers: int, key_len: int
     _merge_tables(merged_db, worker_dbs, schema_sql,
                   table="kgram_counts", pk_cols=pk_cols)
 
+def _count_followup_worker(
+        worker_id: int,
+        batch: Iterable[Dict[str, Any]],
+        model_path: str,
+        key_len: int,
+        val_len: int,
+        top_prefixes: set[Tuple[int, ...]],
+        db_dir: str,
+        dataset: str,
+    ) -> int:
+    db_path = os.path.join(db_dir, f"{dataset}_cnt_followup_worker{worker_id}.sqlite")
+    schema_sql = _generate_schema_cnt_followup(key_len, val_len)
+    with _open_db(db_path, schema_sql) as conn:
+        tokenizer = AutoTokenizer.from_pretrained(model_path, use_fast=True, use_cache=False, model_max_length=2**20, legacy=True)
+        for example in batch:
+            tokens = tokenizer(example["text"])["input_ids"]
+            _count_followups(tokens, key_len, val_len, top_prefixes, conn)
+        return len(batch)
+
+def build_followup_counts(
+        model_path: str,
+        dataset: str,
+        db_dir: str,
+        num_workers: int,
+        key_len: int,
+        val_len: int,
+        top_prefixes: set[Tuple[int, ...]],
+        thread_batch: int
+    ):
+    # Create the database directory if it doesn't exist
+    os.makedirs(db_dir, exist_ok=True)
+
+    data_stream = load_dataset(dataset, split="train", streaming=True, trust_remote_code=True)
+    total_examples = data_stream.info.splits["train"].num_examples
+    
+    with mp.Pool(processes=num_workers) as pool:
+        with tqdm(total=total_examples) as pbar:
+            bit = _batch_iter(data_stream, thread_batch)
+            data_for_tasks = _construct_data_for_tasks(bit, num_workers)
+            while True:
+                if not data_for_tasks:
+                    break
+
+                results = [
+                    pool.apply_async(_count_followup_worker, args=(wid, batch, model_path, key_len, val_len, top_prefixes, db_dir, dataset))
+                    for wid, batch in data_for_tasks
+                ]
+
+                data_for_tasks = _construct_data_for_tasks(bit, num_workers)
+
+                for r in results:
+                    count = r.get()
+                    pbar.update(count)
+
+def merge_followup_counts(
+        db_dir: str,
+        dataset: str,
+        num_workers: int,
+        key_len: int,
+        val_len: int,
+    ) -> None:
+    merged_db = os.path.join(db_dir, f"{dataset}_cnt_followup_merged.sqlite")
+    worker_dbs = [
+        os.path.join(db_dir, f"{dataset}_cnt_followup_worker{worker_id}.sqlite")
+        for worker_id in range(num_workers)
+    ]
+    
+    # Generate pk_cols string for the merge operation
+    p_cols = [f"p{i+1}" for i in range(key_len)]
+    s_cols = [f"s{i+1}" for i in range(val_len)]
+    pk_cols = ", ".join(p_cols + s_cols)
+    
+    schema_sql = _generate_schema_cnt_followup(key_len, val_len)
+    _merge_tables(merged_db, worker_dbs, schema_sql,
+                  table="follow_counts", pk_cols=pk_cols)
+
 if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Build a cache for Shotgun.")
@@ -347,6 +436,12 @@ if __name__ == "__main__":
         default=None,
         help="Length of the value n-gram for follow-up counting. Required for count-followup stage."
     )
+    parser.add_argument(
+        "--top-ngrams",
+        type=int,
+        default=None,
+        help="Number of top n-grams to use as prefixes for follow-up counting."
+    )
 
     args = parser.parse_args()
 
@@ -367,11 +462,33 @@ if __name__ == "__main__":
     elif args.stage == "count-followup":
         if args.val_len is None:
             parser.error("--val-len is required for count-followup stage")
-        # Implement count-followup logic here
-        pass
+        if args.top_ngrams is None:
+            parser.error("--top-ngrams is required for count-followup stage")
+
+        # Load top n-grams to use as prefixes
+        merged_db = os.path.join(args.db_dir, f"{args.dataset}_cnt_ngram_merged.sqlite")
+        top_ngrams = top_kgrams(args.top_ngrams, merged_db, args.key_len)  # Get top 1000 n-grams
+        top_prefixes = set(kgram for kgram, _ in top_ngrams)
+
+        build_followup_counts(
+            args.model_path,
+            args.dataset,
+            args.db_dir,
+            args.num_workers,
+            args.key_len,
+            args.val_len,
+            top_prefixes,
+            args.thread_batch)
     elif args.stage == "merge-followup":
-        # Implement merge-followup logic here
-        pass
+        if args.val_len is None:
+            parser.error("--val-len is required for merge-followup stage")
+
+        merge_followup_counts(
+            args.db_dir, 
+            args.dataset, 
+            args.num_workers, 
+            args.key_len,
+            args.val_len)
     else:
         raise ValueError(f"Invalid stage: {args.stage}")
     

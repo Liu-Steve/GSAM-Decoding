@@ -7,29 +7,39 @@ from collections import deque
 from tqdm.auto import tqdm
 from datasets import load_dataset
 from transformers import AutoTokenizer
-from typing import Iterable, Sequence
+from typing import Iterable, Sequence, List, Dict, Tuple, Any, Union
 
 
 _FAST_PRAGMAS = """
     PRAGMA journal_mode=WAL;
     PRAGMA synchronous  = OFF;
     PRAGMA temp_store   = MEMORY;
-    PRAGMA cache_size   = -524288;          -- 512 MiB page cache (negative -> KiB)
+    PRAGMA cache_size   = -1048576;          -- 1 GiB page cache (negative -> KiB)
 """
 
-_SCHEMA_P1 = """
+def _generate_schema_p1(key_len: int) -> str:
+    """Generate kgram_counts schema SQL with dynamic key length."""
+    cols = [f"k{i+1} INTEGER NOT NULL" for i in range(key_len)]
+    pk_cols = ", ".join(f"k{i+1}" for i in range(key_len))
+    return f"""
 CREATE TABLE IF NOT EXISTS kgram_counts (
-    kgram TEXT PRIMARY KEY,
-    cnt   INTEGER NOT NULL
+    {', '.join(cols)},
+    cnt INTEGER NOT NULL,
+    PRIMARY KEY({pk_cols})
 );
 """
 
-_SCHEMA_P2 = """
+def _generate_schema_p2(key_len: int, val_len: int) -> str:
+    """Generate follow_counts schema SQL with dynamic key and value length."""
+    prefix_cols = [f"p{i+1} INTEGER NOT NULL" for i in range(key_len)]
+    suffix_cols = [f"s{i+1} INTEGER NOT NULL" for i in range(val_len)]
+    pk_cols = ", ".join([f"p{i+1}" for i in range(key_len)] + [f"s{i+1}" for i in range(val_len)])
+    return f"""
 CREATE TABLE IF NOT EXISTS follow_counts (
-    prefix TEXT NOT NULL,
-    suffix TEXT NOT NULL,
-    cnt    INTEGER NOT NULL,
-    PRIMARY KEY(prefix, suffix)
+    {', '.join(prefix_cols)},
+    {', '.join(suffix_cols)},
+    cnt INTEGER NOT NULL,
+    PRIMARY KEY({pk_cols})
 );
 """
 
@@ -44,30 +54,29 @@ def _open_db(path: str, schema_sql: str) -> sqlite3.Connection:
     return conn
 
 
-def _tokens_to_str(t: Sequence[int]) -> str:
-    return ",".join(map(str, t))
-
-
-def _str_to_tokens(s: str) -> tuple[int, ...]:
-    return tuple(map(int, s.split(",")))
-
-
 def _count_kgrams(int_iter: Iterable[int],
                   k: int,
                   conn: sqlite3.Connection,
                   batch: int = 100_000) -> None:
     """Populate table `kgram_counts` from a stream of ints."""
     cur = conn.cursor()
-    q = ("INSERT INTO kgram_counts(kgram, cnt) VALUES(?,1) "
-         "ON CONFLICT(kgram) DO UPDATE SET cnt = cnt + 1")
+    
+    # Generate dynamic column names and placeholders
+    cols = [f"k{i+1}" for i in range(k)]
+    placeholders = ", ".join(["?"] * k)
+    col_str = ", ".join(cols)
+    pk_str = col_str
+    
+    q = (f"INSERT INTO kgram_counts({col_str}, cnt) VALUES({placeholders},1) "
+         f"ON CONFLICT({pk_str}) DO UPDATE SET cnt = cnt + 1")
 
     win = deque(maxlen=k)
-    todo: list[tuple[str]] = []
+    todo: List[Tuple[int, ...]] = []
 
     for x in int_iter:
         win.append(x)
         if len(win) == k:
-            todo.append((_tokens_to_str(win),))
+            todo.append(tuple(win))
             if len(todo) >= batch:
                 cur.executemany(q, todo)
                 todo.clear()
@@ -76,38 +85,56 @@ def _count_kgrams(int_iter: Iterable[int],
 
 
 def top_kgrams(N: int,
-               db_path: str
-    ) -> list[tuple[tuple[int, ...], int]]:
-    with _open_db(db_path, _SCHEMA_P1) as conn:
+               db_path: str,
+               key_len: int
+    ) -> List[Tuple[Tuple[int, ...], int]]:
+    schema_sql = _generate_schema_p1(key_len)
+    with _open_db(db_path, schema_sql) as conn:
         cur = conn.cursor()
-        cur.execute("SELECT kgram, cnt FROM kgram_counts ORDER BY cnt DESC LIMIT ?",
+        
+        cols = [f"k{i+1}" for i in range(key_len)]
+        col_str = ", ".join(cols)
+        
+        cur.execute(f"SELECT {col_str}, cnt FROM kgram_counts ORDER BY cnt DESC LIMIT ?",
                     (N,))
-        rows = [( _str_to_tokens(s), c ) for s, c in cur.fetchall()]
+        
+        rows = []
+        for row in cur.fetchall():
+            kgram = tuple(row[i] for i in range(key_len))
+            count = row[key_len]
+            rows.append((kgram, count))
+            
     return rows
-
 
 
 def _count_followups(int_iter: Iterable[int],
                      k: int, v: int,
-                     top_prefixes: Sequence[str],
+                     top_prefixes: Sequence[Tuple[int, ...]],
                      conn: sqlite3.Connection,
                      batch: int = 100_000
     ) -> None:
+    # Generate dynamic column names and placeholders
+    p_cols = [f"p{i+1}" for i in range(k)]
+    s_cols = [f"s{i+1}" for i in range(v)]
+    placeholders = ", ".join(["?"] * (k + v))
+    col_str = ", ".join(p_cols + s_cols)
+    pk_str = col_str
+    
     cur = conn.cursor()
-    q = ("INSERT INTO follow_counts(prefix, suffix, cnt) VALUES(?,?,1) "
-         "ON CONFLICT(prefix, suffix) DO UPDATE SET cnt = cnt + 1")
+    q = (f"INSERT INTO follow_counts({col_str}, cnt) VALUES({placeholders},1) "
+         f"ON CONFLICT({pk_str}) DO UPDATE SET cnt = cnt + 1")
 
     top_set = set(top_prefixes)
     win = deque(maxlen=k + v)
-    todo: list[tuple[str, str]] = []
+    todo: List[Tuple[int, ...]] = []
 
     for x in int_iter:
         win.append(x)
         if len(win) == k + v:
-            prefix = _tokens_to_str(itertools.islice(win, 0, k))
+            prefix = tuple(itertools.islice(win, 0, k))
             if prefix in top_set:
-                suffix = _tokens_to_str(itertools.islice(win, k, k + v))
-                todo.append((prefix, suffix))
+                suffix = tuple(itertools.islice(win, k, k + v))
+                todo.append((*prefix, *suffix))
                 if len(todo) >= batch:
                     cur.executemany(q, todo)
                     todo.clear()
@@ -118,29 +145,43 @@ def _count_followups(int_iter: Iterable[int],
 def top_followups(int_iter: Iterable[int],
                   k: int,
                   v: int,
-                  prefixes: Sequence[tuple[int, ...]],
+                  prefixes: Sequence[Tuple[int, ...]],
                   M: int,
                   db_path: str
-                  ) -> dict[tuple[int, ...], list[tuple[tuple[int, ...], int]]]:
-    conn = _open_db(db_path, _SCHEMA_P2)
+                  ) -> Dict[Tuple[int, ...], List[Tuple[Tuple[int, ...], int]]]:
+    schema_sql = _generate_schema_p2(k, v)
+    conn = _open_db(db_path, schema_sql)
 
     # Build counts
     _count_followups(
         int_iter,
         k, v,
-        [_tokens_to_str(p) for p in prefixes],
+        prefixes,
         conn
     )
 
     # Fetch results
     cur = conn.cursor()
-    out: dict[tuple[int, ...], list[tuple[tuple[int, ...], int]]] = {}
+    out: Dict[Tuple[int, ...], List[Tuple[Tuple[int, ...], int]]] = {}
+    
+    p_cols = [f"p{i+1}" for i in range(k)]
+    s_cols = [f"s{i+1}" for i in range(v)]
+    p_where = " AND ".join(f"{col} = ?" for col in p_cols)
+    s_col_str = ", ".join(s_cols)
+    
     for p in prefixes:
-        ps = _tokens_to_str(p)
         cur.execute(
-            "SELECT suffix, cnt FROM follow_counts "
-            "WHERE prefix = ? ORDER BY cnt DESC LIMIT ?", (ps, M))
-        out[p] = [(_str_to_tokens(s), c) for s, c in cur.fetchall()]
+            f"SELECT {s_col_str}, cnt FROM follow_counts "
+            f"WHERE {p_where} ORDER BY cnt DESC LIMIT ?", 
+            (*p, M))
+        
+        suffix_results = []
+        for row in cur.fetchall():
+            suffix = tuple(row[i] for i in range(v))
+            count = row[v]
+            suffix_results.append((suffix, count))
+            
+        out[p] = suffix_results
 
     conn.close()
     return out
@@ -205,8 +246,9 @@ def construct_task(bit, num_workers):
 
 def process_batch(worker_id, batch, model_path, key_len, db_dir, dataset):
     db_path = os.path.join(db_dir, f"{dataset}_cnt_ngram_worker{worker_id}.sqlite")
-    with _open_db(db_path, _SCHEMA_P1) as conn:
-        tokenizer = AutoTokenizer.from_pretrained(model_path, use_fast=True, use_cache=False, model_max_length=65536, legacy=True)
+    schema_sql = _generate_schema_p1(key_len)
+    with _open_db(db_path, schema_sql) as conn:
+        tokenizer = AutoTokenizer.from_pretrained(model_path, use_fast=True, use_cache=False, model_max_length=2**20, legacy=True)
         for example in batch:
             tokens = tokenizer(example["text"])["input_ids"]
             _count_kgrams(tokens, key_len, conn)
@@ -246,14 +288,19 @@ def build_ngram_counts(
                     pbar.update(count)
 
 
-def merge_ngram_counts(db_dir: str, dataset: str, num_workers: int):
+def merge_ngram_counts(db_dir: str, dataset: str, num_workers: int, key_len: int):
     merged_db = os.path.join(db_dir, f"{dataset}_cnt_ngram_merged.sqlite")
     worker_dbs = [
         os.path.join(db_dir, f"{dataset}_cnt_ngram_worker{worker_id}.sqlite")
         for worker_id in range(num_workers)
     ]
-    _merge_tables(merged_db, worker_dbs, _SCHEMA_P1,
-                  table="kgram_counts", pk_cols="kgram")
+    
+    # Generate pk_cols string for the merge operation
+    pk_cols = ", ".join(f"k{i+1}" for i in range(key_len))
+    
+    schema_sql = _generate_schema_p1(key_len)
+    _merge_tables(merged_db, worker_dbs, schema_sql,
+                  table="kgram_counts", pk_cols=pk_cols)
 
 if __name__ == "__main__":
 
@@ -295,6 +342,12 @@ if __name__ == "__main__":
         type=int,
         required=True,
     )
+    parser.add_argument(
+        "--val-len",
+        type=int,
+        default=None,
+        help="Length of the value n-gram for follow-up counting. Required for count-followup stage."
+    )
 
     args = parser.parse_args()
 
@@ -306,7 +359,19 @@ if __name__ == "__main__":
             args.num_workers,
             args.key_len,
             args.thread_batch)
+    elif args.stage == "merge-ngram":
+        merge_ngram_counts(
+            args.db_dir, 
+            args.dataset, 
+            args.num_workers, 
+            args.key_len)
     elif args.stage == "count-followup":
+        if args.val_len is None:
+            parser.error("--val-len is required for count-followup stage")
+        # Implement count-followup logic here
+        pass
+    elif args.stage == "merge-followup":
+        # Implement merge-followup logic here
         pass
     else:
         raise ValueError(f"Invalid stage: {args.stage}")

@@ -1,3 +1,4 @@
+import numpy as np
 from collections import OrderedDict
 from typing import Optional
 
@@ -118,24 +119,28 @@ class ShotgunCache:
             )
             for config in configs
         ]
-        self._key_token_lens = [config._key_token_len for config in configs]
 
-        self.max_key_token_len = max(self._key_token_lens)
+        self._key_lens = [config._key_token_len for config in configs]
+        self._value_lens = [config._value_token_len for config in configs]
+        self.max_key_len = max(self._key_lens)
+        self.max_value_len = max(self._value_lens)
+        self.max_key_value_len = self.max_key_len + self.max_value_len
 
-    def get_draft_tokens(self, key: Tokens) -> list[Tokens]:
+    def get_draft_tokens(self, key: np.ndarray) -> list[Tokens]:
         """
         Retrieves draft tokens from all caches for the given `key`.
         
         Args:
-            key: The input token IDs to use as a key for cache lookup.
+        - key: The input token IDs to use as a key for cache lookup. If a cache table requires
+          a key of length `k`, then the last `k` tokens of `key` will be used as the key.
             
         Returns:
             A list of draft tokens if any cache has a match, or an empty list if no matches found.
         """
         drafts_list = [
             drafts
-            for cache, key_token_len in zip(self._caches, self._key_token_lens)
-            if (drafts := cache.get(tuple(key[-key_token_len:]))) is not None
+            for cache, key_len in zip(self._caches, self._key_lens)
+            if (drafts := cache.get(tuple(key[-key_len:]))) is not None
         ]
 
         return [
@@ -143,3 +148,20 @@ class ShotgunCache:
             for drafts in drafts_list
             for draft in drafts
         ]
+
+    def update_cache(self, token_ids: np.ndarray) -> None:
+        """
+        Updates the cache with the given token IDs.
+
+        Args:
+        - token_ids: The token IDs to update the cache with.
+        """
+        for cache, key_len, value_len in zip(self._caches, self._key_lens, self._value_lens):
+            total_len = key_len + value_len
+            if len(token_ids) < total_len:
+                continue
+            offset_limit = len(token_ids) - total_len + 1
+            for offset in range(offset_limit):
+                key = token_ids[offset:offset+key_len]
+                value = token_ids[offset+key_len:offset+total_len]
+                cache.put(tuple(key), tuple(value))

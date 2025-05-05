@@ -8,7 +8,7 @@ from model.shotgun.lru_cache import ShotgunCache
 
 
 def get_draft_tokens(input_ids: np.ndarray, shotgun_cache: ShotgunCache):
-    key = input_ids[-shotgun_cache.max_key_token_len:]
+    key = input_ids[-shotgun_cache.max_key_len:]
     drafts = shotgun_cache.get_draft_tokens(key)
 
     if not drafts:
@@ -38,13 +38,13 @@ def make_4d_attention_mask(
       to earlier positions within their own draft, but not to other drafts.
 
     Args:
-    - cached_prefix_len: int, length of the KV-cached prefix
-    - uncached_prefix_len: int, length of the uncached prefix
-    - draft_lens: list of ints, lengths of each draft token sequence
-    - dtype: desired dtype of the output mask
+    - `cached_prefix_len`: `int`, length of the KV-cached prefix
+    - `uncached_prefix_len`: `int`, length of the uncached prefix
+    - `draft_lens`: `list[int]`, lengths of each draft token sequence
+    - `dtype`: `np.dtype`, desired dtype of the output mask
 
     Returns:
-    - mask: (1, 1, query_len, total_len) NumPy array of 1.0 and 0.0
+    - `mask`: (1, 1, query_len, total_len) NumPy array of 1.0 and 0.0
 
     Example:
 
@@ -121,6 +121,7 @@ def shotgun(
     prefix_len = prefix_ids.shape[0]
     uncached_prefix_len = prefix_len
     prefix_poss = np.arange(prefix_len)
+    shotgun_cache.update_cache(prefix_ids)
 
     for step in count():
         # Query the cache table to get the draft tokens.
@@ -185,6 +186,10 @@ def shotgun(
         accept_length_list.append(uncached_prefix_len)
         prefix_len = prefix_ids.shape[0]
         prefix_poss = np.arange(prefix_len - uncached_prefix_len, prefix_len)
+
+        # Update the cache.
+        cache_update_offset = uncached_prefix_len - 1
+        shotgun_cache.update_cache(prefix_ids[-shotgun_cache.max_key_value_len-cache_update_offset:])
 
         # Check termination conditions.
         if (accepted_ids == eos_token_id).any() or (next_tok_id == eos_token_id):

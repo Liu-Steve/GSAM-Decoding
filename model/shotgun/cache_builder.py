@@ -85,9 +85,11 @@ def _generate_schema_followup_counts(prefix_len: int, followup_len: int) -> str:
     Returns:
     - SQL statement string for creating the table
     """
+
     prefix_cols = [f"p{i+1} INTEGER NOT NULL" for i in range(prefix_len)]
     followup_cols = [f"s{i+1} INTEGER NOT NULL" for i in range(followup_len)]
     pk_cols = ", ".join([f"p{i+1}" for i in range(prefix_len)] + [f"s{i+1}" for i in range(followup_len)])
+
     return f"""
 CREATE TABLE IF NOT EXISTS followup_counts (
     {', '.join(prefix_cols)},
@@ -108,6 +110,7 @@ def _into_batch_iter(stream: Iterable[Any], batch_size: int) -> Iterable[List[An
     Returns:
     - An iterator of batches of data.
     """
+
     it = iter(stream)
     while True:
         batch = list(itertools.islice(it, batch_size))
@@ -226,6 +229,7 @@ def _worker_kgram_counts(
     Returns:
     - Number of examples processed.
     """
+
     db_path = os.path.join(db_dir, f"{dataset}_cnt_ngram_worker{worker_id}.sqlite")
     schema = _generate_schema_kgram_counts(prefix_len)
 
@@ -263,6 +267,7 @@ def build_kgram_counts(
     - `prefix_len`: Length of the k-gram.
     - `worker_batch_size`: Number of examples per worker batch.
     """
+
     # Create the database directory if it doesn't exist
     os.makedirs(db_dir, exist_ok=True)
 
@@ -343,7 +348,7 @@ def merge_kgram_counts(
         num_workers: int,
         prefix_len: int
     ) -> None:
-    """Merge the worker databases into a single database.
+    """Merge the worker k-gram counts databases into a single database.
 
     Args:
     - `db_dir`: Directory to load and save the database.
@@ -353,8 +358,8 @@ def merge_kgram_counts(
     """
 
     # Generate paths to the worker databases and the merged database.
-    merged_db = os.path.join(db_dir, f"{dataset}_cnt_ngram_merged.sqlite")
-    worker_dbs = [
+    merged_db_path = os.path.join(db_dir, f"{dataset}_cnt_ngram_merged.sqlite")
+    worker_db_paths = [
         os.path.join(db_dir, f"{dataset}_cnt_ngram_worker{worker_id}.sqlite")
         for worker_id in range(num_workers)
     ]
@@ -363,41 +368,58 @@ def merge_kgram_counts(
     pk_cols = ", ".join(f"k{i+1}" for i in range(prefix_len))
 
     schema = _generate_schema_kgram_counts(prefix_len)
-    _merge_tables(merged_db, worker_dbs, schema,
+    _merge_tables(merged_db_path, worker_db_paths, schema,
                   table="kgram_counts", pk_cols=pk_cols)
 
 
-def _count_followups(
+def _update_followup_counts_db(
         it: Iterable[int],
-        key_len: int,
-        val_len: int,
+        prefix_len: int,
+        followup_len: int,
         top_prefixes: set[Tuple[int, ...]],
         conn: sqlite3.Connection,
-        batch: int = 100_000
+        query_batch_size: int = 100_000
     ) -> None:
-    """Populate table `followup_counts` with counts of k-grams followed by v-grams."""
-    # Generate dynamic column names and placeholders
-    p_cols = [f"p{i+1}" for i in range(key_len)]
-    s_cols = [f"s{i+1}" for i in range(val_len)]
-    placeholders = ", ".join(["?"] * (key_len + val_len))
-    col_str = ", ".join(p_cols + s_cols)
-    pk_str = col_str
-    
+    """Update the followup counts database with a stream of ints.
+
+    The table counts the number of times each v-gram in the stream appears immediately
+    after a top k-gram. `prefix_len` is the `k` in k-gram. `followup_len` is the `v`
+    in v-gram.
+
+    Args:
+    - `it`: Iterable of ints.
+    - `prefix_len`: Length of the prefix.
+    - `followup_len`: Length of the followup.
+    - `top_prefixes`: Set of top prefixes to update the database with.
+    - `conn`: Connection to the database.
+    - `query_batch_size`: Number of SQL queries to execute at a time.
+    """
+
     cur = conn.cursor()
+
+    # Generate SQL query string.
+    prefix_cols = [f"p{i+1}" for i in range(prefix_len)]
+    followup_cols = [f"s{i+1}" for i in range(followup_len)]
+    placeholders = ", ".join(["?"] * (prefix_len + followup_len))
+    col_str = ", ".join(prefix_cols + followup_cols)
+    pk_str = col_str
     q = (f"INSERT INTO followup_counts({col_str}, cnt) VALUES({placeholders},1) "
          f"ON CONFLICT({pk_str}) DO UPDATE SET cnt = cnt + 1")
 
-    win = deque(maxlen=key_len + val_len)
-    todo: List[Tuple[int, ...]] = []
+    # Use a sliding window to collect prefix and followup tokens.
+    window = deque(maxlen=prefix_len+followup_len)
 
+    # Collect prefix and followup tokens in a list and execute a single SQL query when
+    # the list reaches the size of `query_batch_size`.
+    todo = []
     for x in it:
-        win.append(x)
-        if len(win) == key_len + val_len:
-            prefix = tuple(itertools.islice(win, 0, key_len))
+        window.append(x)
+        if len(window) == prefix_len + followup_len:
+            prefix = tuple(itertools.islice(window, 0, prefix_len))
             if prefix in top_prefixes:
-                suffix = tuple(itertools.islice(win, key_len, key_len + val_len))
+                suffix = tuple(itertools.islice(window, prefix_len, prefix_len + followup_len))
                 todo.append((*prefix, *suffix))
-                if len(todo) >= batch:
+                if len(todo) >= query_batch_size:
                     cur.executemany(q, todo)
                     todo.clear()
     if todo:
@@ -405,56 +427,155 @@ def _count_followups(
 
 
 def get_top_followups(
-                  key_len: int,
-                  val_len: int,
-                  prefixes: Sequence[Tuple[int, ...]],
-                  M: int,
-                  db_path: str
+        top_n: int,
+        prefix_len: int,
+        followup_len: int,
+        top_prefixes: Sequence[Tuple[int, ...]],
+        db_path: str
     ) -> Dict[Tuple[int, ...], List[Tuple[Tuple[int, ...], int]]]:
     """
     Get the top M followups for each prefix from a pre-built database.
 
     Args:
-        key_len: Length of prefix
-        val_len: Length of suffix
-        prefixes: Sequence of prefixes to get followups for
-        M: Number of top followups to return per prefix
-        db_path: Path to the database containing followup counts
-        
+    - `prefix_len`: Length of prefix.
+    - `followup_len`: Length of followup.
+    - `prefixes`: Sequence of prefixes to get followups for.
+    - `M`: Number of top followups to return per prefix.
+    - `db_path`: Path to the database containing followup counts.
+
     Returns:
-        Dictionary mapping prefixes to lists of (suffix, count) pairs
+    - Dictionary mapping prefixes to lists of (followup, count) pairs.
     """
-    schema_sql = _generate_schema_followup_counts(key_len, val_len)
-    conn = _open_db(db_path, schema_sql)
+    schema = _generate_schema_followup_counts(prefix_len, followup_len)
+    with _open_db(db_path, schema) as conn:
 
-    # Fetch results
-    cur = conn.cursor()
-    out: Dict[Tuple[int, ...], List[Tuple[Tuple[int, ...], int]]] = {}
-    
-    p_cols = [f"p{i+1}" for i in range(key_len)]
-    s_cols = [f"s{i+1}" for i in range(val_len)]
-    p_where = " AND ".join(f"{col} = ?" for col in p_cols)
-    s_col_str = ", ".join(s_cols)
-    
-    for p in prefixes:
-        cur.execute(
-            f"SELECT {s_col_str}, cnt FROM followup_counts "
-            f"WHERE {p_where} ORDER BY cnt DESC LIMIT ?", 
-            (*p, M))
+        # Fetch results
+        cur = conn.cursor()
+        out: Dict[Tuple[int, ...], List[Tuple[Tuple[int, ...], int]]] = {}
         
-        suffix_results = []
-        for row in cur.fetchall():
-            suffix = tuple(row[i] for i in range(val_len))
-            count = row[val_len]
-            suffix_results.append((suffix, count))
+        prefix_cols = [f"p{i+1}" for i in range(prefix_len)]
+        followup_cols = [f"s{i+1}" for i in range(followup_len)]
+        prefix_where = " AND ".join(f"{col} = ?" for col in prefix_cols)
+        followup_col_str = ", ".join(followup_cols)
+        
+        for p in top_prefixes:
+            cur.execute(
+                f"SELECT {followup_col_str}, cnt FROM followup_counts "
+                f"WHERE {prefix_where} ORDER BY cnt DESC LIMIT ?", 
+                (*p, top_n))
             
-        out[p] = suffix_results
+            followup_results = []
+            for row in cur.fetchall():
+                followup = tuple(row[i] for i in range(followup_len))
+                count = row[followup_len]
+                followup_results.append((followup, count))
+                
+            out[p] = followup_results
 
-    conn.close()
     return out
 
-def _merge_tables(target_db: str,
-                  worker_dbs: Sequence[str],
+
+def _worker_followup_counts(
+        worker_id: int,
+        batch: Iterable[Dict[str, Any]],
+        model_path: str,
+        prefix_len: int,
+        followup_len: int,
+        top_prefixes: set[Tuple[int, ...]],
+        db_dir: str,
+        dataset: str,
+    ) -> int:
+    """Update the followup counts database with a batch of data.
+
+    Args:
+    - `worker_id`: ID of the worker.
+    - `batch`: Batch of data to update the database with.
+    - `model_path`: Path to the model.
+    - `prefix_len`: Length of the prefix.
+    - `followup_len`: Length of the followup.
+    - `top_prefixes`: Set of top prefixes to update the database with.
+    - `db_dir`: Directory to load and save the database.
+    - `dataset`: Name of the dataset.
+
+    Returns:
+    - Number of examples processed.
+    """
+    db_path = os.path.join(db_dir, f"{dataset}_cnt_followup_worker{worker_id}.sqlite")
+    schema = _generate_schema_followup_counts(prefix_len, followup_len)
+    with _open_db(db_path, schema) as conn:
+        tokenizer = AutoTokenizer.from_pretrained(model_path, use_fast=True, use_cache=False, model_max_length=2**20, legacy=True)
+        for example in batch:
+            tokens = tokenizer(example["text"])["input_ids"]
+            _update_followup_counts_db(tokens, prefix_len, followup_len, top_prefixes, conn)
+        return len(batch)
+
+
+def build_followup_counts(
+        model_path: str,
+        dataset: str,
+        db_dir: str,
+        num_workers: int,
+        prefix_len: int,
+        followup_len: int,
+        top_prefixes: set[Tuple[int, ...]],
+        thread_batch: int
+    ) -> None:
+    """Build the followup counts database by tokenizing the training set from
+    the dataset and updating the database in parallel. Each worker updates a
+    separate database. These worker databases can be merged into a single
+    database using the `merge_followup_counts` function.
+
+    Args:
+    - `model_path`: Path to the model.
+    - `dataset`: Name of the dataset.
+    - `db_dir`: Directory to load and save the database.
+    - `num_workers`: Number of workers.
+    - `prefix_len`: Length of the prefix.
+    - `followup_len`: Length of the followup.
+    - `top_prefixes`: Set of top prefixes to update the database with.
+    - `thread_batch`: Number of examples per worker batch.
+    """
+
+    # Create the database directory if it doesn't exist.
+    os.makedirs(db_dir, exist_ok=True)
+
+    # Load the dataset in streaming mode.
+    data_stream = load_dataset(dataset, split="train", streaming=True, trust_remote_code=True)
+    total_examples = data_stream.info.splits["train"].num_examples
+    
+    # Create a pool of workers to update the database.
+    with mp.Pool(processes=num_workers) as pool:
+        with tqdm(total=total_examples) as pbar:
+
+            # Create a batch iterator.
+            batch_iter = _into_batch_iter(data_stream, thread_batch)
+
+            # Prepare data for each worker for the first iteration.
+            data_for_tasks = _prepare_data_for_workers(batch_iter, num_workers)
+
+            # Run until the batch iterator is exhausted.
+            while True:
+                if not data_for_tasks:
+                    break
+
+                # Run the workers in parallel.
+                results = [
+                    pool.apply_async(_worker_followup_counts, args=(wid, batch, model_path, prefix_len, followup_len, top_prefixes, db_dir, dataset))
+                    for wid, batch in data_for_tasks
+                ]
+
+                # Prepare data for each worker for the next iteration while
+                # the workers are running.
+                data_for_tasks = _prepare_data_for_workers(batch_iter, num_workers)
+
+                # Wait for the workers to finish and update the progress bar.
+                for r in results:
+                    count = r.get()
+                    pbar.update(count)
+
+
+def _merge_tables(merged_db_path: str,
+                  worker_db_paths: Sequence[str],
                   schema: str,
                   table: str,
                   pk_cols: str
@@ -464,10 +585,10 @@ def _merge_tables(target_db: str,
     summing counts on primary-key conflict.
     `pk_cols` is the comma-separated primary key column list (for ON CONFLICT).
     """
-    with _open_db(target_db, schema) as conn:
+    with _open_db(merged_db_path, schema) as conn:
         cur = conn.cursor()
 
-        for wdb in tqdm(worker_dbs):
+        for wdb in tqdm(worker_db_paths):
             # Attach worker database
             cur.execute(f"ATTACH DATABASE '{wdb}' AS worker")
             
@@ -491,80 +612,27 @@ def _merge_tables(target_db: str,
             cur.execute("DROP TABLE merged")
             cur.execute("DETACH DATABASE worker")
 
-def _count_followup_worker(
-        worker_id: int,
-        batch: Iterable[Dict[str, Any]],
-        model_path: str,
-        key_len: int,
-        val_len: int,
-        top_prefixes: set[Tuple[int, ...]],
-        db_dir: str,
-        dataset: str,
-    ) -> int:
-    db_path = os.path.join(db_dir, f"{dataset}_cnt_followup_worker{worker_id}.sqlite")
-    schema = _generate_schema_followup_counts(key_len, val_len)
-    with _open_db(db_path, schema) as conn:
-        tokenizer = AutoTokenizer.from_pretrained(model_path, use_fast=True, use_cache=False, model_max_length=2**20, legacy=True)
-        for example in batch:
-            tokens = tokenizer(example["text"])["input_ids"]
-            _count_followups(tokens, key_len, val_len, top_prefixes, conn)
-        return len(batch)
-
-def build_followup_counts(
-        model_path: str,
-        dataset: str,
-        db_dir: str,
-        num_workers: int,
-        key_len: int,
-        val_len: int,
-        top_prefixes: set[Tuple[int, ...]],
-        thread_batch: int
-    ):
-    # Create the database directory if it doesn't exist
-    os.makedirs(db_dir, exist_ok=True)
-
-    data_stream = load_dataset(dataset, split="train", streaming=True, trust_remote_code=True)
-    total_examples = data_stream.info.splits["train"].num_examples
-    
-    with mp.Pool(processes=num_workers) as pool:
-        with tqdm(total=total_examples) as pbar:
-            bit = _into_batch_iter(data_stream, thread_batch)
-            data_for_tasks = _prepare_data_for_workers(bit, num_workers)
-            while True:
-                if not data_for_tasks:
-                    break
-
-                results = [
-                    pool.apply_async(_count_followup_worker, args=(wid, batch, model_path, key_len, val_len, top_prefixes, db_dir, dataset))
-                    for wid, batch in data_for_tasks
-                ]
-
-                data_for_tasks = _prepare_data_for_workers(bit, num_workers)
-
-                for r in results:
-                    count = r.get()
-                    pbar.update(count)
 
 def merge_followup_counts(
         db_dir: str,
         dataset: str,
         num_workers: int,
-        key_len: int,
-        val_len: int,
+        prefix_len: int,
+        followup_len: int,
     ) -> None:
-    merged_db = os.path.join(db_dir, f"{dataset}_cnt_followup_merged.sqlite")
-    worker_dbs = [
+    merged_db_path = os.path.join(db_dir, f"{dataset}_cnt_followup_merged.sqlite")
+    worker_db_paths = [
         os.path.join(db_dir, f"{dataset}_cnt_followup_worker{worker_id}.sqlite")
         for worker_id in range(num_workers)
     ]
     
     # Generate pk_cols string for the merge operation
-    p_cols = [f"p{i+1}" for i in range(key_len)]
-    s_cols = [f"s{i+1}" for i in range(val_len)]
-    pk_cols = ", ".join(p_cols + s_cols)
-    
-    schema_sql = _generate_schema_followup_counts(key_len, val_len)
-    _merge_tables(merged_db, worker_dbs, schema_sql,
+    prefix_cols = [f"p{i+1}" for i in range(prefix_len)]
+    followup_cols = [f"s{i+1}" for i in range(followup_len)]
+    pk_cols = ", ".join(prefix_cols + followup_cols)
+
+    schema = _generate_schema_followup_counts(prefix_len, followup_len)
+    _merge_tables(merged_db_path, worker_db_paths, schema,
                   table="followup_counts", pk_cols=pk_cols)
 
 if __name__ == "__main__":

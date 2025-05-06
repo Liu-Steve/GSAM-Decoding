@@ -8,6 +8,7 @@ from tqdm.auto import tqdm
 from datasets import load_dataset
 from transformers import AutoTokenizer
 from typing import Iterable, Sequence, List, Dict, Tuple, Any, Union
+import math
 
 
 _FAST_PRAGMAS = """
@@ -342,34 +343,293 @@ def get_top_kgrams(
     return rows
 
 
+def _merge_two_dbs(
+        output_db_path: str,
+        input_db_path1: str, 
+        input_db_path2: str,
+        schema: str,
+        table: str,
+        pk_cols: str
+    ) -> str:
+    """
+    Merge two databases into a new output database.
+    
+    Args:
+    - `output_db_path`: Path to the output merged database.
+    - `input_db_path1`: Path to the first input database.
+    - `input_db_path2`: Path to the second input database.
+    - `schema`: SQL schema for creating the database.
+    - `table`: Name of the table to merge.
+    - `pk_cols`: Comma-separated primary key column list.
+    
+    Returns:
+    - Path to the output database
+    """
+    # Skip if output already exists
+    if os.path.exists(output_db_path):
+        return output_db_path
+        
+    # Skip if either input doesn't exist
+    if not os.path.exists(input_db_path1) or not os.path.exists(input_db_path2):
+        if os.path.exists(input_db_path1):
+            # Just copy the first database if the second doesn't exist
+            with open(input_db_path1, 'rb') as src, open(output_db_path, 'wb') as dst:
+                dst.write(src.read())
+        elif os.path.exists(input_db_path2):
+            # Just copy the second database if the first doesn't exist
+            with open(input_db_path2, 'rb') as src, open(output_db_path, 'wb') as dst:
+                dst.write(src.read())
+        return output_db_path
+    
+    conn = None    
+    try:
+        conn = _open_db(output_db_path, schema)
+        cur = conn.cursor()
+        
+        # Attach both input databases
+        cur.execute(f"ATTACH DATABASE '{input_db_path1}' AS db1")
+        cur.execute(f"ATTACH DATABASE '{input_db_path2}' AS db2")
+        
+        # Directly insert the aggregated data into the output table
+        cur.execute(f"""
+        INSERT INTO {table}({pk_cols}, cnt)
+        SELECT {pk_cols}, SUM(cnt) as total_cnt
+        FROM (
+            SELECT {pk_cols}, cnt FROM db1.{table}
+            UNION ALL
+            SELECT {pk_cols}, cnt FROM db2.{table}
+        )
+        GROUP BY {pk_cols}
+        """)
+        
+        # Clean up
+        cur.execute("DETACH DATABASE db1")
+        cur.execute("DETACH DATABASE db2")
+    finally:
+        # Make sure to close the connection even if an error occurs
+        if conn:
+            conn.close()
+            
+    return output_db_path
+
+def _parallel_merge_worker(args):
+    """Worker function for parallel merge tasks"""
+    output_path, input_path1, input_path2, schema, table, pk_cols = args
+    return _merge_two_dbs(output_path, input_path1, input_path2, schema, table, pk_cols)
+
+def _parallel_hierarchical_merge(
+        db_dir: str,
+        dataset: str,
+        num_workers: int,
+        num_prev_workers: int,
+        schema: str,
+        table: str,
+        pk_cols: str,
+        db_type: str
+    ) -> str:
+    """
+    Merge databases hierarchically in parallel using a tournament-like approach.
+    
+    Args:
+    - `db_dir`: Directory containing the databases.
+    - `dataset`: Name of the dataset.
+    - `num_workers`: Number of workers to run the merge.
+    - `num_prev_workers`: Number of worker databases to merge.
+    - `schema`: SQL schema for creating the database.
+    - `table`: Name of the table to merge.
+    - `pk_cols`: Comma-separated primary key column list.
+    - `db_type`: Type of database ("ngram" or "followup").
+    
+    Returns:
+    - Path to the final merged database.
+    """
+    # Generate paths to the worker databases and track their index ranges
+    current_files = [
+        (os.path.join(db_dir, f"{dataset}_cnt_{db_type}_worker{worker_id}.sqlite"), worker_id, worker_id)
+        for worker_id in range(num_prev_workers)
+    ]
+    
+    final_db_path = os.path.join(db_dir, f"{dataset}_cnt_{db_type}_merged.sqlite")
+    
+    # If only one worker, just rename the file
+    if num_prev_workers == 1:
+        if os.path.exists(current_files[0][0]):
+            with open(current_files[0][0], 'rb') as src, open(final_db_path, 'wb') as dst:
+                dst.write(src.read())
+        return final_db_path
+
+    # Limit number of processes to avoid system resource exhaustion
+    actual_workers = min(num_workers, mp.cpu_count())
+
+    with mp.Pool(processes=actual_workers) as pool:
+        iteration = 0
+
+        # Continue merging until we have only one database
+        while len(current_files) > 1:
+            next_files = []
+            merge_tasks = []
+
+            # Prepare merge tasks for this iteration
+            for i in range(0, len(current_files), 2):
+                if i + 1 < len(current_files):
+                    # We have a pair to merge
+                    file1_path, start_idx1, end_idx1 = current_files[i]
+                    file2_path, start_idx2, end_idx2 = current_files[i+1]
+
+                    # Use the start index of the first file and end index of the second file
+                    start_idx = start_idx1
+                    end_idx = end_idx2
+
+                    output_path = os.path.join(db_dir, f"{dataset}_cnt_{db_type}_merged_{start_idx}_{end_idx}.sqlite")
+                    merge_tasks.append((output_path, file1_path, file2_path, schema, table, pk_cols))
+                    next_files.append((output_path, start_idx, end_idx))
+                else:
+                    # Odd number of databases, pass this one to the next iteration
+                    next_files.append(current_files[i])
+
+            # Run merge tasks in parallel
+            with tqdm(total=len(merge_tasks), desc=f"Merge iteration {iteration+1}") as pbar:
+                # Run at most num_workers tasks at once using apply_async
+                results = []
+                for task in merge_tasks:
+                    if len(results) >= actual_workers:
+                        # Wait for one task to complete before adding more
+                        results[0].get()
+                        pbar.update(1)
+                        results.pop(0)
+                    # Add new task
+                    results.append(pool.apply_async(_parallel_merge_worker, args=(task,)))
+
+                # Wait for remaining tasks to complete
+                for result in results:
+                    result.get()
+                    pbar.update(1)
+
+            current_files = next_files
+            iteration += 1
+            
+            # Force garbage collection after each iteration
+            import gc
+            gc.collect()
+
+        # Rename the final merged database
+        if current_files and os.path.exists(current_files[0][0]):
+            with open(current_files[0][0], 'rb') as src, open(final_db_path, 'wb') as dst:
+                dst.write(src.read())
+    
+    return final_db_path
+
+def _merge_tables(merged_db_path: str,
+                  worker_db_paths: Sequence[str],
+                  schema: str,
+                  table: str,
+                  pk_cols: str
+    ) -> None:
+    """
+    Merge *identical* tables from worker_dbs into target_db,
+    summing counts on primary-key conflict.
+    `pk_cols` is the comma-separated primary key column list (for ON CONFLICT).
+    
+    Note: This function is kept for backward compatibility but new code should use
+    _parallel_hierarchical_merge for better performance.
+    """
+    with _open_db(merged_db_path, schema) as conn:
+        cur = conn.cursor()
+
+        for wdb in tqdm(worker_db_paths):
+            # Attach worker database
+            cur.execute(f"ATTACH DATABASE '{wdb}' AS worker")
+            
+            # Create a temporary view of merged data
+            cur.execute(f"""
+            CREATE TEMPORARY TABLE merged AS
+            SELECT {pk_cols}, SUM(cnt) as total_cnt
+            FROM (
+                SELECT {pk_cols}, cnt FROM {table}
+                UNION ALL
+                SELECT {pk_cols}, cnt FROM worker.{table}
+            )
+            GROUP BY {pk_cols}
+            """)
+            
+            # Replace main table with merged data
+            cur.execute(f"DELETE FROM {table}")
+            cur.execute(f"INSERT INTO {table}({pk_cols}, cnt) SELECT {pk_cols}, total_cnt FROM merged")
+            
+            # Clean up
+            cur.execute("DROP TABLE merged")
+            cur.execute("DETACH DATABASE worker")
+
+def merge_followup_counts(
+        db_dir: str,
+        dataset: str,
+        num_workers: int,
+        num_prev_workers: int,
+        prefix_len: int,
+        followup_len: int,
+    ) -> None:
+    """Merge the worker followup counts databases into a single database using parallel hierarchical merging.
+    
+    Args:
+    - `db_dir`: Directory containing the databases.
+    - `dataset`: Name of the dataset.
+    - `num_workers`: Number of workers to run the merge.
+    - `num_prev_workers`: Number of worker databases to merge.
+    - `prefix_len`: Length of the prefix sequence.
+    - `followup_len`: Length of the followup sequence.
+    """
+    # Generate pk_cols string for the merge operation
+    prefix_cols = [f"p{i+1}" for i in range(prefix_len)]
+    followup_cols = [f"s{i+1}" for i in range(followup_len)]
+    pk_cols = ", ".join(prefix_cols + followup_cols)
+
+    schema = _generate_schema_followup_counts(prefix_len, followup_len)
+    
+    # Use the parallel hierarchical merge
+    _parallel_hierarchical_merge(
+        db_dir, 
+        dataset, 
+        num_workers, 
+        num_prev_workers, 
+        schema, 
+        "followup_counts", 
+        pk_cols, 
+        "followup"
+    )
+
+
 def merge_kgram_counts(
         db_dir: str,
         dataset: str,
         num_workers: int,
+        num_prev_workers: int,
         prefix_len: int
     ) -> None:
-    """Merge the worker k-gram counts databases into a single database.
-
+    """Merge the worker k-gram counts databases into a single database using parallel hierarchical merging.
+    
     Args:
-    - `db_dir`: Directory to load and save the database.
+    - `db_dir`: Directory containing the databases.
     - `dataset`: Name of the dataset.
-    - `num_workers`: Number of workers.
+    - `num_workers`: Number of workers to run the merge.
+    - `num_prev_workers`: Number of worker databases to merge.
     - `prefix_len`: Length of the k-gram.
     """
-
-    # Generate paths to the worker databases and the merged database.
-    merged_db_path = os.path.join(db_dir, f"{dataset}_cnt_ngram_merged.sqlite")
-    worker_db_paths = [
-        os.path.join(db_dir, f"{dataset}_cnt_ngram_worker{worker_id}.sqlite")
-        for worker_id in range(num_workers)
-    ]
-    
     # Generate pk_cols string for the merge operation
     pk_cols = ", ".join(f"k{i+1}" for i in range(prefix_len))
 
     schema = _generate_schema_kgram_counts(prefix_len)
-    _merge_tables(merged_db_path, worker_db_paths, schema,
-                  table="kgram_counts", pk_cols=pk_cols)
+
+    # Use the parallel hierarchical merge
+    _parallel_hierarchical_merge(
+        db_dir, 
+        dataset, 
+        num_workers, 
+        num_prev_workers, 
+        schema, 
+        "kgram_counts", 
+        pk_cols, 
+        "ngram"
+    )
 
 
 def _update_followup_counts_db(
@@ -573,68 +833,6 @@ def build_followup_counts(
                     count = r.get()
                     pbar.update(count)
 
-
-def _merge_tables(merged_db_path: str,
-                  worker_db_paths: Sequence[str],
-                  schema: str,
-                  table: str,
-                  pk_cols: str
-    ) -> None:
-    """
-    Merge *identical* tables from worker_dbs into target_db,
-    summing counts on primary-key conflict.
-    `pk_cols` is the comma-separated primary key column list (for ON CONFLICT).
-    """
-    with _open_db(merged_db_path, schema) as conn:
-        cur = conn.cursor()
-
-        for wdb in tqdm(worker_db_paths):
-            # Attach worker database
-            cur.execute(f"ATTACH DATABASE '{wdb}' AS worker")
-            
-            # Create a temporary view of merged data
-            cur.execute(f"""
-            CREATE TEMPORARY TABLE merged AS
-            SELECT {pk_cols}, SUM(cnt) as total_cnt
-            FROM (
-                SELECT {pk_cols}, cnt FROM {table}
-                UNION ALL
-                SELECT {pk_cols}, cnt FROM worker.{table}
-            )
-            GROUP BY {pk_cols}
-            """)
-            
-            # Replace main table with merged data
-            cur.execute(f"DELETE FROM {table}")
-            cur.execute(f"INSERT INTO {table}({pk_cols}, cnt) SELECT {pk_cols}, total_cnt FROM merged")
-            
-            # Clean up
-            cur.execute("DROP TABLE merged")
-            cur.execute("DETACH DATABASE worker")
-
-
-def merge_followup_counts(
-        db_dir: str,
-        dataset: str,
-        num_workers: int,
-        prefix_len: int,
-        followup_len: int,
-    ) -> None:
-    merged_db_path = os.path.join(db_dir, f"{dataset}_cnt_followup_merged.sqlite")
-    worker_db_paths = [
-        os.path.join(db_dir, f"{dataset}_cnt_followup_worker{worker_id}.sqlite")
-        for worker_id in range(num_workers)
-    ]
-    
-    # Generate pk_cols string for the merge operation
-    prefix_cols = [f"p{i+1}" for i in range(prefix_len)]
-    followup_cols = [f"s{i+1}" for i in range(followup_len)]
-    pk_cols = ", ".join(prefix_cols + followup_cols)
-
-    schema = _generate_schema_followup_counts(prefix_len, followup_len)
-    _merge_tables(merged_db_path, worker_db_paths, schema,
-                  table="followup_counts", pk_cols=pk_cols)
-
 if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Build a cache for Shotgun.")
@@ -687,7 +885,12 @@ if __name__ == "__main__":
         default=None,
         help="Number of top n-grams to use as prefixes for follow-up counting."
     )
-
+    parser.add_argument(
+        "--num-prev-workers",
+        type=int,
+        default=None,
+        help="Number of previous worker databases to merge. Required for merge-followup stage."
+    )
     args = parser.parse_args()
 
     if args.stage == "count-ngram":
@@ -703,6 +906,7 @@ if __name__ == "__main__":
             args.db_dir, 
             args.dataset, 
             args.num_workers, 
+            args.num_prev_workers,
             args.key_len)
     elif args.stage == "count-followup":
         if args.val_len is None:
@@ -732,6 +936,7 @@ if __name__ == "__main__":
             args.db_dir, 
             args.dataset, 
             args.num_workers, 
+            args.num_prev_workers,
             args.key_len,
             args.val_len)
     else:

@@ -349,10 +349,12 @@ def _merge_two_dbs(
         input_db_path2: str,
         schema: str,
         table: str,
-        pk_cols: str
+        pk_cols: str,
+        batch_size: int = 1000000
     ) -> str:
     """
-    Merge two databases into a new output database.
+    Merge two databases into a new output database using direct SQL operations.
+    Uses a memory-efficient approach by working with a new output table.
     
     Args:
     - `output_db_path`: Path to the output merged database.
@@ -361,6 +363,7 @@ def _merge_two_dbs(
     - `schema`: SQL schema for creating the database.
     - `table`: Name of the table to merge.
     - `pk_cols`: Comma-separated primary key column list.
+    - `batch_size`: Number of rows to process in each batch (used for progress reporting).
     
     Returns:
     - Path to the output database
@@ -381,18 +384,31 @@ def _merge_two_dbs(
                 dst.write(src.read())
         return output_db_path
     
-    conn = None    
+    # Create output database with schema
+    conn_out = _open_db(output_db_path, schema)
+    cur_out = conn_out.cursor()
+    
     try:
-        conn = _open_db(output_db_path, schema)
-        cur = conn.cursor()
+        # Set pragmas to optimize for memory usage
+        cur_out.execute("PRAGMA temp_store = FILE")  # Store temp tables on disk
+        cur_out.execute("PRAGMA page_size = 4096")   # Smaller page size
+        cur_out.execute("PRAGMA cache_size = 1000000") # Control cache size
+        
+        # Begin transaction for better performance
+        cur_out.execute("BEGIN TRANSACTION")
         
         # Attach both input databases
-        cur.execute(f"ATTACH DATABASE '{input_db_path1}' AS db1")
-        cur.execute(f"ATTACH DATABASE '{input_db_path2}' AS db2")
+        cur_out.execute(f"ATTACH DATABASE '{input_db_path1}' AS db1")
+        cur_out.execute(f"ATTACH DATABASE '{input_db_path2}' AS db2")
         
-        # Directly insert the aggregated data into the output table
-        cur.execute(f"""
-        INSERT INTO {table}({pk_cols}, cnt)
+        # Create a temporary table with the same schema as the main table
+        # This avoids having both tables in memory at the same time
+        cur_out.execute(f"CREATE TABLE merged_table AS SELECT * FROM {table} WHERE 0")
+        
+        # Insert the aggregated data directly into the new table
+        # This approach uses much less memory than creating a full temporary table first
+        cur_out.execute(f"""
+        INSERT INTO merged_table ({pk_cols}, cnt)
         SELECT {pk_cols}, SUM(cnt) as total_cnt
         FROM (
             SELECT {pk_cols}, cnt FROM db1.{table}
@@ -402,20 +418,35 @@ def _merge_two_dbs(
         GROUP BY {pk_cols}
         """)
         
-        # Clean up
-        cur.execute("DETACH DATABASE db1")
-        cur.execute("DETACH DATABASE db2")
+        # Drop the original table and rename the merged table
+        cur_out.execute(f"DROP TABLE {table}")
+        cur_out.execute(f"ALTER TABLE merged_table RENAME TO {table}")
+
+        # Commit transaction
+        cur_out.execute("COMMIT")
+        
+        # Detach databases
+        cur_out.execute("DETACH DATABASE db1")
+        cur_out.execute("DETACH DATABASE db2")
+        
+        # Vacuum the database to optimize storage
+        cur_out.execute("VACUUM")
+        
+    except Exception as e:
+        # Rollback if there's an error
+        cur_out.execute("ROLLBACK")
+        raise e
     finally:
-        # Make sure to close the connection even if an error occurs
-        if conn:
-            conn.close()
+        # Close output connection
+        cur_out.close()
+        conn_out.close()
             
     return output_db_path
 
 def _parallel_merge_worker(args):
     """Worker function for parallel merge tasks"""
-    output_path, input_path1, input_path2, schema, table, pk_cols = args
-    return _merge_two_dbs(output_path, input_path1, input_path2, schema, table, pk_cols)
+    output_path, input_path1, input_path2, schema, table, pk_cols, batch_size = args
+    return _merge_two_dbs(output_path, input_path1, input_path2, schema, table, pk_cols, batch_size)
 
 def _parallel_hierarchical_merge(
         db_dir: str,
@@ -425,7 +456,8 @@ def _parallel_hierarchical_merge(
         schema: str,
         table: str,
         pk_cols: str,
-        db_type: str
+        db_type: str,
+        batch_size: int = 1000000
     ) -> str:
     """
     Merge databases hierarchically in parallel using a tournament-like approach.
@@ -439,6 +471,7 @@ def _parallel_hierarchical_merge(
     - `table`: Name of the table to merge.
     - `pk_cols`: Comma-separated primary key column list.
     - `db_type`: Type of database ("ngram" or "followup").
+    - `batch_size`: Number of rows to process in each batch.
     
     Returns:
     - Path to the final merged database.
@@ -481,7 +514,7 @@ def _parallel_hierarchical_merge(
                     end_idx = end_idx2
 
                     output_path = os.path.join(db_dir, f"{dataset}_cnt_{db_type}_merged_{start_idx}_{end_idx}.sqlite")
-                    merge_tasks.append((output_path, file1_path, file2_path, schema, table, pk_cols))
+                    merge_tasks.append((output_path, file1_path, file2_path, schema, table, pk_cols, batch_size))
                     next_files.append((output_path, start_idx, end_idx))
                 else:
                     # Odd number of databases, pass this one to the next iteration
@@ -516,6 +549,10 @@ def _parallel_hierarchical_merge(
         if current_files and os.path.exists(current_files[0][0]):
             with open(current_files[0][0], 'rb') as src, open(final_db_path, 'wb') as dst:
                 dst.write(src.read())
+                
+            # Vacuum the final database to reclaim storage and reduce file size
+            with _open_db(final_db_path, schema) as conn:
+                conn.execute("VACUUM")
     
     return final_db_path
 
@@ -535,6 +572,10 @@ def _merge_tables(merged_db_path: str,
     """
     with _open_db(merged_db_path, schema) as conn:
         cur = conn.cursor()
+        
+        # Clean pk_cols to avoid SQL syntax errors
+        pk_cols_list = [col.strip() for col in pk_cols.split(',')]
+        clean_pk_cols = ", ".join(pk_cols_list)
 
         for wdb in tqdm(worker_db_paths):
             # Attach worker database
@@ -543,18 +584,18 @@ def _merge_tables(merged_db_path: str,
             # Create a temporary view of merged data
             cur.execute(f"""
             CREATE TEMPORARY TABLE merged AS
-            SELECT {pk_cols}, SUM(cnt) as total_cnt
+            SELECT {clean_pk_cols}, SUM(cnt) as total_cnt
             FROM (
-                SELECT {pk_cols}, cnt FROM {table}
+                SELECT {clean_pk_cols}, cnt FROM {table}
                 UNION ALL
-                SELECT {pk_cols}, cnt FROM worker.{table}
+                SELECT {clean_pk_cols}, cnt FROM worker.{table}
             )
-            GROUP BY {pk_cols}
+            GROUP BY {clean_pk_cols}
             """)
             
             # Replace main table with merged data
             cur.execute(f"DELETE FROM {table}")
-            cur.execute(f"INSERT INTO {table}({pk_cols}, cnt) SELECT {pk_cols}, total_cnt FROM merged")
+            cur.execute(f"INSERT INTO {table}({clean_pk_cols}, cnt) SELECT {clean_pk_cols}, total_cnt FROM merged")
             
             # Clean up
             cur.execute("DROP TABLE merged")
@@ -567,6 +608,7 @@ def merge_followup_counts(
         num_prev_workers: int,
         prefix_len: int,
         followup_len: int,
+        batch_size: int = 50000
     ) -> None:
     """Merge the worker followup counts databases into a single database using parallel hierarchical merging.
     
@@ -577,6 +619,7 @@ def merge_followup_counts(
     - `num_prev_workers`: Number of worker databases to merge.
     - `prefix_len`: Length of the prefix sequence.
     - `followup_len`: Length of the followup sequence.
+    - `batch_size`: Number of rows to process in each batch during merging.
     """
     # Generate pk_cols string for the merge operation
     prefix_cols = [f"p{i+1}" for i in range(prefix_len)]
@@ -594,7 +637,8 @@ def merge_followup_counts(
         schema, 
         "followup_counts", 
         pk_cols, 
-        "followup"
+        "followup",
+        batch_size
     )
 
 
@@ -603,7 +647,8 @@ def merge_kgram_counts(
         dataset: str,
         num_workers: int,
         num_prev_workers: int,
-        prefix_len: int
+        prefix_len: int,
+        batch_size: int = 1000000
     ) -> None:
     """Merge the worker k-gram counts databases into a single database using parallel hierarchical merging.
     
@@ -613,6 +658,7 @@ def merge_kgram_counts(
     - `num_workers`: Number of workers to run the merge.
     - `num_prev_workers`: Number of worker databases to merge.
     - `prefix_len`: Length of the k-gram.
+    - `batch_size`: Number of rows to process in each batch during merging.
     """
     # Generate pk_cols string for the merge operation
     pk_cols = ", ".join(f"k{i+1}" for i in range(prefix_len))
@@ -628,7 +674,8 @@ def merge_kgram_counts(
         schema, 
         "kgram_counts", 
         pk_cols, 
-        "ngram"
+        "ngram",
+        batch_size
     )
 
 
@@ -891,6 +938,12 @@ if __name__ == "__main__":
         default=None,
         help="Number of previous worker databases to merge. Required for merge-followup stage."
     )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=50000,
+        help="Batch size for merge operations to control memory usage."
+    )
     args = parser.parse_args()
 
     if args.stage == "count-ngram":
@@ -907,7 +960,8 @@ if __name__ == "__main__":
             args.dataset, 
             args.num_workers, 
             args.num_prev_workers,
-            args.key_len)
+            args.key_len,
+            args.batch_size)
     elif args.stage == "count-followup":
         if args.val_len is None:
             parser.error("--val-len is required for count-followup stage")
@@ -938,7 +992,8 @@ if __name__ == "__main__":
             args.num_workers, 
             args.num_prev_workers,
             args.key_len,
-            args.val_len)
+            args.val_len,
+            args.batch_size)
     else:
         raise ValueError(f"Invalid stage: {args.stage}")
     

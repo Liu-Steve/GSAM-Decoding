@@ -9,6 +9,8 @@ from datasets import load_dataset
 from transformers import AutoTokenizer
 from typing import Iterable, Sequence, List, Dict, Tuple, Any, Union
 import math
+import pickle
+import tempfile
 
 
 _FAST_PRAGMAS = """
@@ -788,7 +790,7 @@ def _worker_followup_counts(
         model_path: str,
         prefix_len: int,
         followup_len: int,
-        top_prefixes: set[Tuple[int, ...]],
+        top_prefixes_path: str,
         db_dir: str,
         dataset: str,
     ) -> int:
@@ -800,13 +802,17 @@ def _worker_followup_counts(
     - `model_path`: Path to the model.
     - `prefix_len`: Length of the prefix.
     - `followup_len`: Length of the followup.
-    - `top_prefixes`: Set of top prefixes to update the database with.
+    - `top_prefixes_path`: Path to the pickled top_prefixes set.
     - `db_dir`: Directory to load and save the database.
     - `dataset`: Name of the dataset.
 
     Returns:
     - Number of examples processed.
     """
+    # Load top_prefixes from file
+    with open(top_prefixes_path, 'rb') as f:
+        top_prefixes = pickle.load(f)
+        
     db_path = os.path.join(db_dir, f"{dataset}_cnt_followup_worker{worker_id}.sqlite")
     schema = _generate_schema_followup_counts(prefix_len, followup_len)
     with _open_db(db_path, schema) as conn:
@@ -842,43 +848,52 @@ def build_followup_counts(
     - `top_prefixes`: Set of top prefixes to update the database with.
     - `thread_batch`: Number of examples per worker batch.
     """
-
     # Create the database directory if it doesn't exist.
     os.makedirs(db_dir, exist_ok=True)
-
-    # Load the dataset in streaming mode.
-    data_stream = load_dataset(dataset, split="train", streaming=True, trust_remote_code=True)
-    total_examples = data_stream.info.splits["train"].num_examples
     
-    # Create a pool of workers to update the database.
-    with mp.Pool(processes=num_workers) as pool:
-        with tqdm(total=total_examples) as pbar:
+    # Save top_prefixes to a temporary file for workers to load
+    with tempfile.NamedTemporaryFile(delete=False, suffix='.pkl') as f:
+        top_prefixes_path = f.name
+        pickle.dump(top_prefixes, f)
 
-            # Create a batch iterator.
-            batch_iter = _into_batch_iter(data_stream, thread_batch)
+    try:
+        # Load the dataset in streaming mode.
+        data_stream = load_dataset(dataset, split="train", streaming=True, trust_remote_code=True)
+        total_examples = data_stream.info.splits["train"].num_examples
+        
+        # Create a pool of workers to update the database.
+        with mp.Pool(processes=num_workers) as pool:
+            with tqdm(total=total_examples) as pbar:
 
-            # Prepare data for each worker for the first iteration.
-            data_for_tasks = _prepare_data_for_workers(batch_iter, num_workers)
+                # Create a batch iterator.
+                batch_iter = _into_batch_iter(data_stream, thread_batch)
 
-            # Run until the batch iterator is exhausted.
-            while True:
-                if not data_for_tasks:
-                    break
-
-                # Run the workers in parallel.
-                results = [
-                    pool.apply_async(_worker_followup_counts, args=(wid, batch, model_path, prefix_len, followup_len, top_prefixes, db_dir, dataset))
-                    for wid, batch in data_for_tasks
-                ]
-
-                # Prepare data for each worker for the next iteration while
-                # the workers are running.
+                # Prepare data for each worker for the first iteration.
                 data_for_tasks = _prepare_data_for_workers(batch_iter, num_workers)
 
-                # Wait for the workers to finish and update the progress bar.
-                for r in results:
-                    count = r.get()
-                    pbar.update(count)
+                # Run until the batch iterator is exhausted.
+                while True:
+                    if not data_for_tasks:
+                        break
+
+                    # Run the workers in parallel.
+                    results = [
+                        pool.apply_async(_worker_followup_counts, args=(wid, batch, model_path, prefix_len, followup_len, top_prefixes_path, db_dir, dataset))
+                        for wid, batch in data_for_tasks
+                    ]
+
+                    # Prepare data for each worker for the next iteration while
+                    # the workers are running.
+                    data_for_tasks = _prepare_data_for_workers(batch_iter, num_workers)
+
+                    # Wait for the workers to finish and update the progress bar.
+                    for r in results:
+                        count = r.get()
+                        pbar.update(count)
+    finally:
+        # Clean up the temporary file
+        if os.path.exists(top_prefixes_path):
+            os.unlink(top_prefixes_path)
 
 if __name__ == "__main__":
 

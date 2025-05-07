@@ -7,8 +7,7 @@ from collections import deque
 from tqdm.auto import tqdm
 from datasets import load_dataset
 from transformers import AutoTokenizer
-from typing import Iterable, Sequence, List, Dict, Tuple, Any, Union
-import math
+from typing import Iterable, Sequence, List, Dict, Tuple, Any
 import pickle
 import tempfile
 import random
@@ -913,6 +912,66 @@ def build_followup_counts(
             os.unlink(top_prefixes_path)
 
 
+def build_lru_cache(
+        top_prefix_n: int,
+        top_followup_n: int,
+        prefix_db_path: str,
+        followup_db_path: str, 
+        prefix_len: int,
+        followup_len: int,
+        output_path: str
+    ) -> None:
+    """
+    Builds a TwoLevelLRUCache instance from top followups data and saves it as a pickle file.
+    
+    The cache is initialized with the most frequent n-grams as most recently used entries.
+    
+    Args:
+    - `top_prefix_n`: Number of top prefixes to use.
+    - `top_followup_n`: Number of top followups to get per prefix.
+    - `prefix_db_path`: Path to the database containing k-gram counts.
+    - `followup_db_path`: Path to the database containing followup counts.
+    - `prefix_len`: Length of the prefix sequence.
+    - `followup_len`: Length of the followup sequence.
+    - `output_path`: Path to save the pickle file.
+    """
+    from .lru_cache import TwoLevelLRUCache
+    
+    # Get top k-grams to use as prefixes
+    top_kgrams = get_top_kgrams(top_prefix_n, prefix_db_path, prefix_len)
+    top_prefixes = [kgram for kgram, _ in top_kgrams]
+    
+    # Get top followups for each prefix
+    followups_dict = get_top_followups(
+        top_n=top_followup_n,
+        prefix_len=prefix_len,
+        followup_len=followup_len,
+        top_prefixes=top_prefixes,
+        db_path=followup_db_path
+    )
+    
+    # Create a TwoLevelLRUCache
+    cache = TwoLevelLRUCache(
+        prefix_capacity=top_prefix_n,
+        followup_capacity=top_followup_n
+    )
+    
+    # Populate the cache with prefixes and followups
+    # Since top_prefixes is already sorted in descending order of frequency,
+    # we need to insert them in reverse order so the most frequent becomes most recently used
+    for prefix in reversed(top_prefixes):
+        followup_list = followups_dict.get(prefix, [])
+        
+        # Since followup_list is already sorted by frequency in descending order,
+        # we need to insert them in reverse order so the most frequent becomes most recently used
+        for followup, _ in reversed(followup_list):
+            cache.put(prefix, followup)
+    
+    # Dump the cache to a file
+    with open(output_path, 'wb') as f:
+        pickle.dump(cache, f)
+
+
 if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Build a cache for Shotgun.")
@@ -920,7 +979,7 @@ if __name__ == "__main__":
         "--stage",
         type=str,
         required=True,
-        choices=["count-ngram", "merge-ngram", "count-followup", "merge-followup"],
+        choices=["count-ngram", "merge-ngram", "count-followup", "merge-followup", "build-lru-cache"],
         help="The stage of cache building procedure.",
     )
     parser.add_argument(
@@ -983,6 +1042,36 @@ if __name__ == "__main__":
         default=1,
         help="Sampling rate for data processing (1 means no sampling, n > 1 means sample 1/n of the data)."
     )
+    parser.add_argument(
+        "--output-path",
+        type=str,
+        default=None,
+        help="Path to save the resulting cache pickle file. Required for build-lru-cache stage."
+    )
+    parser.add_argument(
+        "--top-prefixes",
+        type=int,
+        default=None,
+        help="Number of top n-grams to use as prefixes."
+    )
+    parser.add_argument(
+        "--top-followups",
+        type=int,
+        default=None,
+        help="Number of top followups to retrieve for each prefix."
+    )
+    parser.add_argument(
+        "--prefix-db-path",
+        type=str,
+        default=None,
+        help="Path to the database containing n-gram counts. Required for build-lru-cache stage."
+    )
+    parser.add_argument(
+        "--followup-db-path",
+        type=str,
+        default=None,
+        help="Path to the database containing followup counts. Required for build-lru-cache stage."
+    )
     args = parser.parse_args()
 
     if args.stage == "count-ngram":
@@ -1010,7 +1099,7 @@ if __name__ == "__main__":
 
         # Load top n-grams to use as prefixes
         merged_db = os.path.join(args.db_dir, f"{args.dataset}_cnt_ngram_merged.sqlite")
-        top_ngrams = get_top_kgrams(args.top_ngrams, merged_db, args.key_len)  # Get top 1000 n-grams
+        top_ngrams = get_top_kgrams(args.top_ngrams, merged_db, args.key_len)
         top_prefixes = set(kgram for kgram, _ in top_ngrams)
 
         build_followup_counts(
@@ -1035,6 +1124,29 @@ if __name__ == "__main__":
             args.key_len,
             args.val_len,
             args.batch_size)
+    elif args.stage == "build-lru-cache":
+        if args.val_len is None:
+            parser.error("--val-len is required for build-lru-cache stage")
+        if args.top_prefixes is None:
+            parser.error("--top-prefixes is required for build-lru-cache stage") 
+        if args.top_followups is None:
+            parser.error("--top-followups is required for build-lru-cache stage") 
+        if args.output_path is None:
+            parser.error("--output-path is required for build-lru-cache stage")
+        if args.prefix_db_path is None:
+            parser.error("--prefix-db-path is required for build-lru-cache stage")
+        if args.followup_db_path is None:
+            parser.error("--followup-db-path is required for build-lru-cache stage")
+            
+        build_lru_cache(
+            top_prefix_n=args.top_prefixes,
+            top_followup_n=args.top_followups,
+            prefix_db_path=args.prefix_db_path,
+            followup_db_path=args.followup_db_path,
+            prefix_len=args.key_len,
+            followup_len=args.val_len,
+            output_path=args.output_path
+        )
     else:
         raise ValueError(f"Invalid stage: {args.stage}")
     

@@ -1,3 +1,4 @@
+import types
 import numpy as np
 from collections import OrderedDict
 from typing import Optional
@@ -9,97 +10,107 @@ class TwoLevelLRUCache:
     """
     Two-level LRU cache.
 
-    - Top level: up to `prefix_capacity` distinct keys (each a tuple[int, ...]).
-      Most-recently-used (MRU) key is on the right; least-recently-used (LRU) key on the left.
-    - Second level: for every key, up to `followup_capacity` values
-      (also tuples[int, ...]), kept in their own per-key LRU list.
+    - Top level: up to `prefix_capacity` distinct prefixes (each a tuple[int, ...]).
+      Most-recently-used (MRU) prefix is on the right; least-recently-used (LRU) prefix on the left.
+    - Second level: for every prefix, up to `followup_capacity` followups
+      (also tuples[int, ...]), kept in their own per-prefix LRU list.
 
     All public ops below are O(1):
-    - put(key, value):       insert / update and mark MRU
-    - get(key):              return all values for key and mark key MRU
-    - get_value(key, value): check specific value, mark both levels MRU
-    - __contains__(key):     membership test
-    - __len__():             number of keys currently held
+    - put(prefix, followup):       insert / update and mark MRU
+    - get(prefix):              return all followups for prefix and mark prefix MRU
+    - get_followup(prefix, followup): check specific followup, mark both levels MRU
+    - __contains__(prefix):     membership test
+    - __len__():             number of prefixes currently held
     """
 
-    def __init__(self, prefix_capacity: int, followup_capacity: int) -> None:
+    def __init__(
+        self,
+        prefix_capacity: int,
+        followup_capacity: int,
+        prefix_len: int,
+        followup_len: int,
+    ) -> None:
         if prefix_capacity <= 0 or followup_capacity <= 0:
             raise ValueError("Capacities must be positive integers")
         self._prefix_capacity = prefix_capacity
         self._followup_capacity = followup_capacity
+        self._prefix_len = prefix_len
+        self._followup_len = followup_len
 
-        # OrderedDict[key, OrderedDict[value, None]]
+        # OrderedDict[prefix, OrderedDict[followup, None]]
         self._cache: OrderedDict[Tokens, OrderedDict[Tokens, None]] = OrderedDict()
 
-    def _touch_key(self, key: Tokens) -> None:
-        """Mark `key` as most-recently used."""
-        self._cache.move_to_end(key, last=True)
+    def _touch_prefix(self, prefix: Tokens) -> None:
+        """Mark `prefix` as most-recently used."""
+        self._cache.move_to_end(prefix, last=True)
 
-    def _touch_value(self, key: Tokens, value: Tokens) -> None:
-        """Mark `value` (under `key`) as most-recently used."""
-        self._cache[key].move_to_end(value, last=True)
+    def _touch_followup(self, prefix: Tokens, followup: Tokens) -> None:
+        """Mark `followup` (under `prefix`) as most-recently used."""
+        self._cache[prefix].move_to_end(followup, last=True)
 
-    def put(self, key: Tokens, value: Tokens) -> None:
+    def put(self, prefix: Tokens, followup: Tokens) -> None:
         """
-        Insert `value` for `key` (or refresh its recency if already present).
+        Insert `followup` for `prefix` (or refresh its recency if already present).
 
-        Handles both key- and value-level eviction when capacity limits are exceeded.
+        Handles both prefix- and followup-level eviction when capacity limits are exceeded.
         """
-        if key in self._cache:
-            self._touch_key(key)
-            vcache = self._cache[key]
-            if value in vcache:
-                self._touch_value(key, value)
+        if prefix in self._cache:
+            self._touch_prefix(prefix)
+            vcache = self._cache[prefix]
+            if followup in vcache:
+                self._touch_followup(prefix, followup)
             else:
-                if len(vcache) >= self._followup_capacity:          # evict LRU value
+                if len(vcache) >= self._followup_capacity:          # evict LRU followup
                     vcache.popitem(last=False)
-                vcache[value] = None
-                self._touch_value(key, value)
+                vcache[followup] = None
+                self._touch_followup(prefix, followup)
         else:
-            if len(self._cache) >= self._prefix_capacity:        # evict LRU key (and its values)
+            if len(self._cache) >= self._prefix_capacity:        # evict LRU prefix (and its followups)
                 self._cache.popitem(last=False)
-            self._cache[key] = OrderedDict({value: None})
+            self._cache[prefix] = OrderedDict({followup: None})
 
-    def get(self, key: Tokens) -> Optional[list[Tokens]]:
+    def get(self, prefix: Tokens) -> Optional[list[Tokens]]:
         """
-        Return all values associated with `key` (MRU to LRU order) and
-        mark `key` as most-recently used.  Returns None on a miss.
+        Return all followups associated with `prefix` (MRU to LRU order) and
+        mark `prefix` as most-recently used.  Returns None on a miss.
         """
-        if key not in self._cache:
+        if prefix not in self._cache:
             return None
-        self._touch_key(key)
-        return list(self._cache[key].keys())
+        self._touch_prefix(prefix)
+        return list(self._cache[prefix].keys())
 
-    def get_value(self, key: Tokens, value: Tokens) -> Optional[Tokens]:
+    def get_followup(self, prefix: Tokens, followup: Tokens) -> Optional[Tokens]:
         """
-        Access a specific (key, value) pair.
+        Access a specific (prefix, followup) pair.
 
-        Touches both key and value on a hit; returns the `value` or None on a miss.
+        Touches both prefix and followup on a hit; returns the `followup` or None on a miss.
         """
-        if key not in self._cache:
+        if prefix not in self._cache:
             return None
-        vcache = self._cache[key]
-        if value not in vcache:
-            self._touch_key(key)                   # still update key recency
+        vcache = self._cache[prefix]
+        if followup not in vcache:
+            self._touch_prefix(prefix)                   # still update prefix recency
             return None
-        self._touch_key(key)
-        self._touch_value(key, value)
-        return value
+        self._touch_prefix(prefix)
+        self._touch_followup(prefix, followup)
+        return followup
 
-    def __contains__(self, key: Tokens) -> bool:
-        return key in self._cache
+    def __contains__(self, prefix: Tokens) -> bool:
+        return prefix in self._cache
 
     def __len__(self) -> int:
-        """Number of keys currently stored."""
+        """Number of prefixes currently stored."""
         return len(self._cache)
         
     @staticmethod
-    def load_from_file(path: str) -> 'TwoLevelLRUCache':
+    def load_from_file(path: str, frozen: bool = False) -> 'TwoLevelLRUCache':
         """
         Load a `TwoLevelLRUCache` instance from a pickle file.
         
         Args:
         - `path`: Path to the pickle file containing a `TwoLevelLRUCache` instance.
+        - `frozen`: If True, the cache will be frozen, meaning its recency tracking
+                   will be disabled and items won't change position in the LRU order.
         
         Returns:
         - A `TwoLevelLRUCache` instance.
@@ -113,6 +124,20 @@ class TwoLevelLRUCache:
         if not isinstance(cache, TwoLevelLRUCache):
             raise ValueError(f"The pickle file does not contain a TwoLevelLRUCache instance. Found {type(cache).__name__} instead.")
         
+        if frozen:
+            # Define no-op methods
+            def noop_touch_prefix(self, prefix):
+                pass
+            def noop_touch_followup(self, prefix, followup):
+                pass
+            def noop_put(self, prefix, followup):
+                pass
+            
+            # Replace methods with no-ops
+            cache._touch_prefix = types.MethodType(noop_touch_prefix, cache)
+            cache._touch_followup = types.MethodType(noop_touch_followup, cache)
+            cache.put = types.MethodType(noop_put, cache)
+        
         return cache
 
 
@@ -121,13 +146,17 @@ class ShotgunCacheConfig:
         self,
         prefix_capacity: int,
         followup_capacity: int,
-        key_token_len: int,
-        value_token_len: int,
+        prefix_token_len: int,
+        followup_token_len: int,
+        file_path: Optional[str] = None,
+        frozen: Optional[bool] = False,
     ) -> None:
         self._prefix_capacity = prefix_capacity
         self._followup_capacity = followup_capacity
-        self._key_token_len = key_token_len
-        self._value_token_len = value_token_len
+        self._prefix_token_len = prefix_token_len
+        self._followup_token_len = followup_token_len
+        self._file_path = file_path
+        self._frozen = frozen
 
 
 class ShotgunCache:
@@ -135,35 +164,56 @@ class ShotgunCache:
         if not configs:
             raise ValueError("At least one cache config is required")
 
-        self._caches = [
-            TwoLevelLRUCache(
-                config._prefix_capacity,
-                config._followup_capacity,
-            )
-            for config in configs
-        ]
+        self._caches = []
+        for config in configs:
+            if config._file_path:
+                cache = TwoLevelLRUCache.load_from_file(config._file_path, config._frozen)
+                if cache._prefix_len != config._prefix_token_len:
+                    raise ValueError(
+                        f"Cache prefix length mismatch. "
+                        f"Expected {config._prefix_token_len}, "
+                        f"got {cache._prefix_len} "
+                        f"from file {config._file_path}"
+                    )
+                if cache._followup_len != config._followup_token_len:
+                    raise ValueError(
+                        f"Cache followup length mismatch. "
+                        f"Expected {config._followup_token_len}, "
+                        f"got {cache._followup_len} "
+                        f"from file {config._file_path}"
+                    )
+                self._caches.append(cache)
+            else:
+                self._caches.append(
+                    TwoLevelLRUCache(
+                        config._prefix_capacity,
+                        config._followup_capacity,
+                        config._prefix_token_len,
+                        config._followup_token_len,
+                    )
+                )
 
-        self._key_lens = [config._key_token_len for config in configs]
-        self._value_lens = [config._value_token_len for config in configs]
-        self.max_key_len = max(self._key_lens)
-        self.max_value_len = max(self._value_lens)
-        self.max_key_value_len = self.max_key_len + self.max_value_len
+        self._prefix_lens = [config._prefix_token_len for config in configs]
+        self._followup_lens = [config._followup_token_len for config in configs]
+        self.max_prefix_len = max(self._prefix_lens)
+        self.max_followup_len = max(self._followup_lens)
+        self.max_prefix_followup_len = self.max_prefix_len + self.max_followup_len
 
-    def get_draft_tokens(self, key: np.ndarray) -> list[Tokens]:
+    def get_draft_tokens(self, prefix: np.ndarray) -> list[Tokens]:
         """
-        Retrieves draft tokens from all caches for the given `key`.
+        Retrieves draft tokens from all caches for the given `prefix`.
         
         Args:
-        - key: The input token IDs to use as a key for cache lookup. If a cache table requires
-          a key of length `k`, then the last `k` tokens of `key` will be used as the key.
+        - prefix: The input token IDs to use as a prefix for cache lookup. If a cache table requires
+          a prefix of length `k`, then the last `k` tokens of `prefix` will be used as the prefix.
             
         Returns:
             A list of draft tokens if any cache has a match, or an empty list if no matches found.
         """
         drafts_list = [
             drafts
-            for cache, key_len in zip(self._caches, self._key_lens)
-            if (drafts := cache.get(tuple(key[-key_len:]))) is not None
+            for cache, prefix_len in zip(self._caches, self._prefix_lens)
+            if (drafts := cache.get(tuple(prefix[-prefix_len:]))) is not None
         ]
 
         return [
@@ -179,12 +229,12 @@ class ShotgunCache:
         Args:
         - token_ids: The token IDs to update the cache with.
         """
-        for cache, key_len, value_len in zip(self._caches, self._key_lens, self._value_lens):
-            total_len = key_len + value_len
+        for cache, prefix_len, followup_len in zip(self._caches, self._prefix_lens, self._followup_lens):
+            total_len = prefix_len + followup_len
             if len(token_ids) < total_len:
                 continue
             offset_limit = len(token_ids) - total_len + 1
             for offset in range(offset_limit):
-                key = token_ids[offset:offset+key_len]
-                value = token_ids[offset+key_len:offset+total_len]
-                cache.put(tuple(key), tuple(value))
+                prefix = token_ids[offset:offset+prefix_len]
+                followup = token_ids[offset+prefix_len:offset+total_len]
+                cache.put(tuple(prefix), tuple(followup))

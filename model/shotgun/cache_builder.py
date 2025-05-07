@@ -11,6 +11,7 @@ from typing import Iterable, Sequence, List, Dict, Tuple, Any, Union
 import math
 import pickle
 import tempfile
+import random
 
 
 _FAST_PRAGMAS = """
@@ -170,7 +171,8 @@ def _update_kgram_counts_db(
         it: Iterable[int],
         prefix_len: int,
         conn: sqlite3.Connection,
-        query_batch_size: int = 100_000
+        query_batch_size: int = 100_000,
+        sample_rate: int = 1
     ) -> None:
     """Populate table `kgram_counts` from a stream of ints.
     
@@ -182,6 +184,7 @@ def _update_kgram_counts_db(
     - `prefix_len`: Length of the k-gram.
     - `conn`: Connection to the database.
     - `query_batch_size`: Number of SQLqueries to execute at a time.
+    - `sample_rate`: Sampling rate (1 means no sampling, n > 1 means sample 1/n of the data).
     """
 
     cur = conn.cursor()
@@ -203,7 +206,9 @@ def _update_kgram_counts_db(
     for x in it:
         window.append(x)
         if len(window) == prefix_len:
-            todo.append(tuple(window))
+            # Only add to todo list with probability 1/sample_rate
+            if sample_rate == 1 or random.randint(1, sample_rate) == 1:
+                todo.append(tuple(window))
             if len(todo) >= query_batch_size:
                 cur.executemany(query_str, todo)
                 todo.clear()
@@ -218,6 +223,7 @@ def _worker_kgram_counts(
         prefix_len: int,
         db_dir: str,
         dataset: str,
+        sample_rate: int = 1
     ) -> int:
     """Update the k-gram counts database with a batch of data.
 
@@ -228,6 +234,7 @@ def _worker_kgram_counts(
     - `prefix_len`: Length of the k-gram.
     - `db_dir`: Directory to load and save the database.
     - `dataset`: Name of the dataset.
+    - `sample_rate`: Sampling rate (1 means no sampling, n > 1 means sample 1/n of the data).
 
     Returns:
     - Number of examples processed.
@@ -244,7 +251,7 @@ def _worker_kgram_counts(
         )
         for example in batch:
             tokens = tokenizer(example["text"])["input_ids"]
-            _update_kgram_counts_db(tokens, prefix_len, conn)
+            _update_kgram_counts_db(tokens, prefix_len, conn, sample_rate=sample_rate)
 
     return len(batch)
 
@@ -255,7 +262,8 @@ def build_kgram_counts(
         db_dir: str,
         num_workers: int,
         prefix_len: int,
-        worker_batch_size: int
+        worker_batch_size: int,
+        sample_rate: int = 1
     ) -> None:
     """Build the k-gram counts database by tokenizing the training set from
     the dataset and updating the database in parallel. Each worker updates a
@@ -269,6 +277,7 @@ def build_kgram_counts(
     - `num_workers`: Number of workers.
     - `prefix_len`: Length of the k-gram.
     - `worker_batch_size`: Number of examples per worker batch.
+    - `sample_rate`: Sampling rate (1 means no sampling, n > 1 means sample 1/n of the data).
     """
 
     # Create the database directory if it doesn't exist
@@ -295,7 +304,7 @@ def build_kgram_counts(
 
                 # Run the workers in parallel.
                 results = [
-                    pool.apply_async(_worker_kgram_counts, args=(wid, batch, model_path, prefix_len, db_dir, dataset))
+                    pool.apply_async(_worker_kgram_counts, args=(wid, batch, model_path, prefix_len, db_dir, dataset, sample_rate))
                     for wid, batch in data_for_workers
                 ]
 
@@ -687,7 +696,8 @@ def _update_followup_counts_db(
         followup_len: int,
         top_prefixes: set[Tuple[int, ...]],
         conn: sqlite3.Connection,
-        query_batch_size: int = 100_000
+        query_batch_size: int = 100_000,
+        sample_rate: int = 1
     ) -> None:
     """Update the followup counts database with a stream of ints.
 
@@ -702,6 +712,7 @@ def _update_followup_counts_db(
     - `top_prefixes`: Set of top prefixes to update the database with.
     - `conn`: Connection to the database.
     - `query_batch_size`: Number of SQL queries to execute at a time.
+    - `sample_rate`: Sampling rate (1 means no sampling, n > 1 means sample 1/n of the data).
     """
 
     cur = conn.cursor()
@@ -726,8 +737,10 @@ def _update_followup_counts_db(
         if len(window) == prefix_len + followup_len:
             prefix = tuple(itertools.islice(window, 0, prefix_len))
             if prefix in top_prefixes:
-                suffix = tuple(itertools.islice(window, prefix_len, prefix_len + followup_len))
-                todo.append((*prefix, *suffix))
+                # Only add to todo list with probability 1/sample_rate
+                if sample_rate == 1 or random.randint(1, sample_rate) == 1:
+                    suffix = tuple(itertools.islice(window, prefix_len, prefix_len + followup_len))
+                    todo.append((*prefix, *suffix))
                 if len(todo) >= query_batch_size:
                     cur.executemany(q, todo)
                     todo.clear()
@@ -793,6 +806,7 @@ def _worker_followup_counts(
         top_prefixes_path: str,
         db_dir: str,
         dataset: str,
+        sample_rate: int = 1
     ) -> int:
     """Update the followup counts database with a batch of data.
 
@@ -805,6 +819,7 @@ def _worker_followup_counts(
     - `top_prefixes_path`: Path to the pickled top_prefixes set.
     - `db_dir`: Directory to load and save the database.
     - `dataset`: Name of the dataset.
+    - `sample_rate`: Sampling rate (1 means no sampling, n > 1 means sample 1/n of the data).
 
     Returns:
     - Number of examples processed.
@@ -819,7 +834,7 @@ def _worker_followup_counts(
         tokenizer = AutoTokenizer.from_pretrained(model_path, use_fast=True, use_cache=False, model_max_length=2**20, legacy=True)
         for example in batch:
             tokens = tokenizer(example["text"])["input_ids"]
-            _update_followup_counts_db(tokens, prefix_len, followup_len, top_prefixes, conn)
+            _update_followup_counts_db(tokens, prefix_len, followup_len, top_prefixes, conn, sample_rate=sample_rate)
         return len(batch)
 
 
@@ -831,7 +846,8 @@ def build_followup_counts(
         prefix_len: int,
         followup_len: int,
         top_prefixes: set[Tuple[int, ...]],
-        thread_batch: int
+        thread_batch: int,
+        sample_rate: int = 1
     ) -> None:
     """Build the followup counts database by tokenizing the training set from
     the dataset and updating the database in parallel. Each worker updates a
@@ -847,6 +863,7 @@ def build_followup_counts(
     - `followup_len`: Length of the followup.
     - `top_prefixes`: Set of top prefixes to update the database with.
     - `thread_batch`: Number of examples per worker batch.
+    - `sample_rate`: Sampling rate (1 means no sampling, n > 1 means sample 1/n of the data).
     """
     # Create the database directory if it doesn't exist.
     os.makedirs(db_dir, exist_ok=True)
@@ -878,7 +895,7 @@ def build_followup_counts(
 
                     # Run the workers in parallel.
                     results = [
-                        pool.apply_async(_worker_followup_counts, args=(wid, batch, model_path, prefix_len, followup_len, top_prefixes_path, db_dir, dataset))
+                        pool.apply_async(_worker_followup_counts, args=(wid, batch, model_path, prefix_len, followup_len, top_prefixes_path, db_dir, dataset, sample_rate))
                         for wid, batch in data_for_tasks
                     ]
 
@@ -959,6 +976,12 @@ if __name__ == "__main__":
         default=50000,
         help="Batch size for merge operations to control memory usage."
     )
+    parser.add_argument(
+        "--sample-rate",
+        type=int,
+        default=1,
+        help="Sampling rate for data processing (1 means no sampling, n > 1 means sample 1/n of the data)."
+    )
     args = parser.parse_args()
 
     if args.stage == "count-ngram":
@@ -968,7 +991,8 @@ if __name__ == "__main__":
             args.db_dir,
             args.num_workers,
             args.key_len,
-            args.thread_batch)
+            args.thread_batch,
+            args.sample_rate)
     elif args.stage == "merge-ngram":
         merge_kgram_counts(
             args.db_dir, 
@@ -996,7 +1020,8 @@ if __name__ == "__main__":
             args.key_len,
             args.val_len,
             top_prefixes,
-            args.thread_batch)
+            args.thread_batch,
+            args.sample_rate)
     elif args.stage == "merge-followup":
         if args.val_len is None:
             parser.error("--val-len is required for merge-followup stage")

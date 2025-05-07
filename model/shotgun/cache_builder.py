@@ -912,6 +912,7 @@ def build_followup_counts(
         if os.path.exists(top_prefixes_path):
             os.unlink(top_prefixes_path)
 
+
 if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Build a cache for Shotgun.")

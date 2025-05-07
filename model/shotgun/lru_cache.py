@@ -8,9 +8,9 @@ class TwoLevelLRUCache:
     """
     Two-level LRU cache.
 
-    - Top level: up to `key_capacity` distinct keys (each a tuple[int, ...]).
+    - Top level: up to `prefix_capacity` distinct keys (each a tuple[int, ...]).
       Most-recently-used (MRU) key is on the right; least-recently-used (LRU) key on the left.
-    - Second level: for every key, up to `value_capacity` values
+    - Second level: for every key, up to `followup_capacity` values
       (also tuples[int, ...]), kept in their own per-key LRU list.
 
     All public ops below are O(1):
@@ -21,11 +21,11 @@ class TwoLevelLRUCache:
     - __len__():             number of keys currently held
     """
 
-    def __init__(self, key_capacity: int, value_capacity: int) -> None:
-        if key_capacity <= 0 or value_capacity <= 0:
+    def __init__(self, prefix_capacity: int, followup_capacity: int) -> None:
+        if prefix_capacity <= 0 or followup_capacity <= 0:
             raise ValueError("Capacities must be positive integers")
-        self._key_capacity = key_capacity
-        self._value_capacity = value_capacity
+        self._prefix_capacity = prefix_capacity
+        self._followup_capacity = followup_capacity
 
         # OrderedDict[key, OrderedDict[value, None]]
         self._cache: OrderedDict[Tokens, OrderedDict[Tokens, None]] = OrderedDict()
@@ -50,12 +50,12 @@ class TwoLevelLRUCache:
             if value in vcache:
                 self._touch_value(key, value)
             else:
-                if len(vcache) >= self._value_capacity:          # evict LRU value
+                if len(vcache) >= self._followup_capacity:          # evict LRU value
                     vcache.popitem(last=False)
                 vcache[value] = None
                 self._touch_value(key, value)
         else:
-            if len(self._cache) >= self._key_capacity:        # evict LRU key (and its values)
+            if len(self._cache) >= self._prefix_capacity:        # evict LRU key (and its values)
                 self._cache.popitem(last=False)
             self._cache[key] = OrderedDict({value: None})
 
@@ -96,13 +96,13 @@ class TwoLevelLRUCache:
 class ShotgunCacheConfig:
     def __init__(
         self,
-        key_capacity: int,
-        value_capacity: int,
+        prefix_capacity: int,
+        followup_capacity: int,
         key_token_len: int,
         value_token_len: int,
     ) -> None:
-        self._key_capacity = key_capacity
-        self._value_capacity = value_capacity
+        self._prefix_capacity = prefix_capacity
+        self._followup_capacity = followup_capacity
         self._key_token_len = key_token_len
         self._value_token_len = value_token_len
 
@@ -114,8 +114,8 @@ class ShotgunCache:
 
         self._caches = [
             TwoLevelLRUCache(
-                config._key_capacity,
-                config._value_capacity,
+                config._prefix_capacity,
+                config._followup_capacity,
             )
             for config in configs
         ]

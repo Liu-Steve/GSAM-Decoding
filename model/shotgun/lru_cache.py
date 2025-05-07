@@ -1,6 +1,7 @@
 import numpy as np
 from collections import OrderedDict
 from typing import Optional
+import pickle
 
 type Tokens = tuple[int, ...]
 
@@ -91,6 +92,28 @@ class TwoLevelLRUCache:
     def __len__(self) -> int:
         """Number of keys currently stored."""
         return len(self._cache)
+        
+    @staticmethod
+    def load_from_file(path: str) -> 'TwoLevelLRUCache':
+        """
+        Load a `TwoLevelLRUCache` instance from a pickle file.
+        
+        Args:
+        - `path`: Path to the pickle file containing a `TwoLevelLRUCache` instance.
+        
+        Returns:
+        - A `TwoLevelLRUCache` instance.
+        
+        Raises:
+        - ValueError: If the pickle file does not contain a `TwoLevelLRUCache` instance.
+        """
+        with open(path, 'rb') as f:
+            cache = pickle.load(f)
+        
+        if not isinstance(cache, TwoLevelLRUCache):
+            raise ValueError(f"The pickle file does not contain a TwoLevelLRUCache instance. Found {type(cache).__name__} instead.")
+        
+        return cache
 
 
 class ShotgunCacheConfig:

@@ -54,6 +54,7 @@ class TwoLevelLRUCache:
 
         Handles both prefix- and followup-level eviction when capacity limits are exceeded.
         """
+
         if prefix in self._cache:
             self._touch_prefix(prefix)
             vcache = self._cache[prefix]
@@ -68,6 +69,38 @@ class TwoLevelLRUCache:
             if len(self._cache) >= self._prefix_capacity:        # evict LRU prefix (and its followups)
                 self._cache.popitem(last=False)
             self._cache[prefix] = OrderedDict({followup: None})
+
+    def resize(self, prefix_capacity: int, followup_capacity: int) -> None:
+        """
+        Resize the cache to new capacity limits.
+        
+        If new capacities are smaller, least recently used entries will be discarded.
+        
+        Args:
+        - `prefix_capacity`: New capacity for prefixes
+        - `followup_capacity`: New capacity for followups per prefix
+        
+        Raises:
+        - `ValueError`: If either capacity is not positive
+        """
+
+        if prefix_capacity <= 0 or followup_capacity <= 0:
+            raise ValueError("Capacities must be positive integers")
+        
+        # Remove least recently used prefixes until we're within the new capacity
+        if prefix_capacity < self._prefix_capacity:
+            while len(self._cache) > prefix_capacity:
+                self._cache.popitem(last=False)
+
+        # Remove least recently used followups until we're within the new capacity
+        if followup_capacity < self._followup_capacity:
+            for followups in self._cache.values():
+                while len(followups) > followup_capacity:
+                    followups.popitem(last=False)
+
+        # Update capacity values
+        self._prefix_capacity = prefix_capacity
+        self._followup_capacity = followup_capacity
 
     def get(self, prefix: Tokens) -> Optional[list[Tokens]]:
         """
@@ -123,7 +156,7 @@ class TwoLevelLRUCache:
         
         if not isinstance(cache, TwoLevelLRUCache):
             raise ValueError(f"The pickle file does not contain a TwoLevelLRUCache instance. Found {type(cache).__name__} instead.")
-        
+
         if frozen:
             # Define no-op methods
             def noop_touch_prefix(self, prefix):
@@ -149,7 +182,7 @@ class ShotgunCacheConfig:
         prefix_token_len: int,
         followup_token_len: int,
         file_path: Optional[str] = None,
-        frozen: Optional[bool] = False,
+        frozen: bool = False,
     ) -> None:
         self._prefix_capacity = prefix_capacity
         self._followup_capacity = followup_capacity
@@ -182,8 +215,11 @@ class ShotgunCache:
                         f"got {cache._followup_len} "
                         f"from file {config._file_path}"
                     )
+                cache.resize(config._prefix_capacity, config._followup_capacity)
                 self._caches.append(cache)
             else:
+                if config._frozen:
+                    raise ValueError("Fresh cache table must not be frozen")
                 self._caches.append(
                     TwoLevelLRUCache(
                         config._prefix_capacity,

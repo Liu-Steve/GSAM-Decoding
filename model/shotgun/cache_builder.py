@@ -359,8 +359,7 @@ def _merge_two_dbs(
         input_db_path2: str,
         schema: str,
         table: str,
-        pk_cols: str,
-        batch_size: int = 1000000
+        pk_cols: str
     ) -> str:
     """
     Merge two databases into a new output database using direct SQL operations.
@@ -373,7 +372,6 @@ def _merge_two_dbs(
     - `schema`: SQL schema for creating the database.
     - `table`: Name of the table to merge.
     - `pk_cols`: Comma-separated primary key column list.
-    - `batch_size`: Number of rows to process in each batch (used for progress reporting).
     
     Returns:
     - Path to the output database
@@ -455,8 +453,8 @@ def _merge_two_dbs(
 
 def _parallel_merge_worker(args):
     """Worker function for parallel merge tasks"""
-    output_path, input_path1, input_path2, schema, table, pk_cols, batch_size = args
-    return _merge_two_dbs(output_path, input_path1, input_path2, schema, table, pk_cols, batch_size)
+    output_path, input_path1, input_path2, schema, table, pk_cols = args
+    return _merge_two_dbs(output_path, input_path1, input_path2, schema, table, pk_cols)
 
 def _parallel_hierarchical_merge(
         db_dir: str,
@@ -466,8 +464,7 @@ def _parallel_hierarchical_merge(
         schema: str,
         table: str,
         pk_cols: str,
-        db_type: str,
-        batch_size: int = 1000000
+        db_type: str
     ) -> str:
     """
     Merge databases hierarchically in parallel using a tournament-like approach.
@@ -481,7 +478,6 @@ def _parallel_hierarchical_merge(
     - `table`: Name of the table to merge.
     - `pk_cols`: Comma-separated primary key column list.
     - `db_type`: Type of database ("ngram" or "followup").
-    - `batch_size`: Number of rows to process in each batch.
     
     Returns:
     - Path to the final merged database.
@@ -524,7 +520,7 @@ def _parallel_hierarchical_merge(
                     end_idx = end_idx2
 
                     output_path = os.path.join(db_dir, f"{dataset}_cnt_{db_type}_merged_{start_idx}_{end_idx}.sqlite")
-                    merge_tasks.append((output_path, file1_path, file2_path, schema, table, pk_cols, batch_size))
+                    merge_tasks.append((output_path, file1_path, file2_path, schema, table, pk_cols))
                     next_files.append((output_path, start_idx, end_idx))
                 else:
                     # Odd number of databases, pass this one to the next iteration
@@ -617,8 +613,7 @@ def merge_followup_counts(
         num_workers: int,
         num_prev_workers: int,
         prefix_len: int,
-        followup_len: int,
-        batch_size: int = 50000
+        followup_len: int
     ) -> None:
     """Merge the worker followup counts databases into a single database using parallel hierarchical merging.
     
@@ -629,7 +624,6 @@ def merge_followup_counts(
     - `num_prev_workers`: Number of worker databases to merge.
     - `prefix_len`: Length of the prefix sequence.
     - `followup_len`: Length of the followup sequence.
-    - `batch_size`: Number of rows to process in each batch during merging.
     """
     # Generate pk_cols string for the merge operation
     prefix_cols = [f"p{i+1}" for i in range(prefix_len)]
@@ -647,8 +641,7 @@ def merge_followup_counts(
         schema, 
         "followup_counts", 
         pk_cols, 
-        "followup",
-        batch_size
+        "followup"
     )
 
 
@@ -657,8 +650,7 @@ def merge_kgram_counts(
         dataset: str,
         num_workers: int,
         num_prev_workers: int,
-        prefix_len: int,
-        batch_size: int = 1000000
+        prefix_len: int
     ) -> None:
     """Merge the worker k-gram counts databases into a single database using parallel hierarchical merging.
     
@@ -668,7 +660,6 @@ def merge_kgram_counts(
     - `num_workers`: Number of workers to run the merge.
     - `num_prev_workers`: Number of worker databases to merge.
     - `prefix_len`: Length of the k-gram.
-    - `batch_size`: Number of rows to process in each batch during merging.
     """
     # Generate pk_cols string for the merge operation
     pk_cols = ", ".join(f"k{i+1}" for i in range(prefix_len))
@@ -684,8 +675,7 @@ def merge_kgram_counts(
         schema, 
         "kgram_counts", 
         pk_cols, 
-        "ngram",
-        batch_size
+        "ngram"
     )
 
 
@@ -972,6 +962,33 @@ def build_lru_cache(
         pickle.dump(cache, f)
 
 
+def _validate_args(args):
+    """
+    Validate that all stage-specific required arguments are provided.
+    Only checks optional arguments that are required for certain stages.
+    Arguments marked as required=True in add_argument() are already validated by argparse.
+    
+    Args:
+    - `args`: ArgumentParser namespace containing command-line arguments.
+    
+    Raises:
+    - `ValueError`: If any required argument for the specified stage is missing.
+    """
+    # Stage-specific required args (only listing optional args that are required for specific stages)
+    required_args = {
+        "count-kgram": ["model_path", "db_dir"],
+        "merge-kgram": ["db_dir", "num_prev_workers"],
+        "count-followup": ["model_path", "db_dir", "followup_len", "top_ngrams"],
+        "merge-followup": ["db_dir", "num_prev_workers", "followup_len"],
+        "build-lru-cache": ["followup_len", "top_prefixes_n", "top_followups_n", "output_path", "prefix_db_path", "followup_db_path"]
+    }
+    
+    # Check that all required args for the given stage are not None
+    for arg_name in required_args[args.stage]:
+        if getattr(args, arg_name) is None:
+            raise ValueError(f"--{arg_name.replace('_', '-')} is required for {args.stage} stage")
+
+
 if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Build a cache for Shotgun.")
@@ -979,7 +996,7 @@ if __name__ == "__main__":
         "--stage",
         type=str,
         required=True,
-        choices=["count-ngram", "merge-ngram", "count-followup", "merge-followup", "build-lru-cache"],
+        choices=["count-kgram", "merge-kgram", "count-followup", "merge-followup", "build-lru-cache"],
         help="The stage of cache building procedure.",
     )
     parser.add_argument(
@@ -995,12 +1012,12 @@ if __name__ == "__main__":
     parser.add_argument(
         "--model-path",
         type=str,
-        required=True,
+        default=None,
     )
     parser.add_argument(
         "--db-dir",
         type=str,
-        required=True,
+        default=None,
     )
     parser.add_argument(
         "--num-workers",
@@ -1008,12 +1025,12 @@ if __name__ == "__main__":
         default=4,
     )
     parser.add_argument(
-        "--key-len",
+        "--prefix-len",
         type=int,
         required=True,
     )
     parser.add_argument(
-        "--val-len",
+        "--followup-len",
         type=int,
         default=None,
         help="Length of the value n-gram for follow-up counting. Required for count-followup stage."
@@ -1031,12 +1048,6 @@ if __name__ == "__main__":
         help="Number of previous worker databases to merge. Required for merge-followup stage."
     )
     parser.add_argument(
-        "--batch-size",
-        type=int,
-        default=50000,
-        help="Batch size for merge operations to control memory usage."
-    )
-    parser.add_argument(
         "--sample-rate",
         type=int,
         default=1,
@@ -1049,13 +1060,13 @@ if __name__ == "__main__":
         help="Path to save the resulting cache pickle file. Required for build-lru-cache stage."
     )
     parser.add_argument(
-        "--top-prefixes",
+        "--top-prefixes-n",
         type=int,
         default=None,
         help="Number of top n-grams to use as prefixes."
     )
     parser.add_argument(
-        "--top-followups",
+        "--top-followups-n",
         type=int,
         default=None,
         help="Number of top followups to retrieve for each prefix."
@@ -1074,32 +1085,29 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    if args.stage == "count-ngram":
+    # Validate arguments based on the stage
+    _validate_args(args)
+
+    if args.stage == "count-kgram":
         build_kgram_counts(
             args.model_path,
             args.dataset,
             args.db_dir,
             args.num_workers,
-            args.key_len,
+            args.prefix_len,
             args.thread_batch,
             args.sample_rate)
-    elif args.stage == "merge-ngram":
+    elif args.stage == "merge-kgram":
         merge_kgram_counts(
             args.db_dir, 
             args.dataset, 
             args.num_workers, 
             args.num_prev_workers,
-            args.key_len,
-            args.batch_size)
+            args.prefix_len)
     elif args.stage == "count-followup":
-        if args.val_len is None:
-            parser.error("--val-len is required for count-followup stage")
-        if args.top_ngrams is None:
-            parser.error("--top-ngrams is required for count-followup stage")
-
         # Load top n-grams to use as prefixes
-        merged_db = os.path.join(args.db_dir, f"{args.dataset}_cnt_ngram_merged.sqlite")
-        top_ngrams = get_top_kgrams(args.top_ngrams, merged_db, args.key_len)
+        merged_db_path = os.path.join(args.db_dir, f"{args.dataset}_cnt_ngram_merged.sqlite")
+        top_ngrams = get_top_kgrams(args.top_ngrams, merged_db_path, args.prefix_len)
         top_prefixes = set(kgram for kgram, _ in top_ngrams)
 
         build_followup_counts(
@@ -1107,46 +1115,26 @@ if __name__ == "__main__":
             args.dataset,
             args.db_dir,
             args.num_workers,
-            args.key_len,
-            args.val_len,
+            args.prefix_len,
+            args.followup_len,
             top_prefixes,
             args.thread_batch,
             args.sample_rate)
     elif args.stage == "merge-followup":
-        if args.val_len is None:
-            parser.error("--val-len is required for merge-followup stage")
-
         merge_followup_counts(
             args.db_dir, 
             args.dataset, 
             args.num_workers, 
             args.num_prev_workers,
-            args.key_len,
-            args.val_len,
-            args.batch_size)
+            args.prefix_len,
+            args.followup_len)
     elif args.stage == "build-lru-cache":
-        if args.val_len is None:
-            parser.error("--val-len is required for build-lru-cache stage")
-        if args.top_prefixes is None:
-            parser.error("--top-prefixes is required for build-lru-cache stage") 
-        if args.top_followups is None:
-            parser.error("--top-followups is required for build-lru-cache stage") 
-        if args.output_path is None:
-            parser.error("--output-path is required for build-lru-cache stage")
-        if args.prefix_db_path is None:
-            parser.error("--prefix-db-path is required for build-lru-cache stage")
-        if args.followup_db_path is None:
-            parser.error("--followup-db-path is required for build-lru-cache stage")
-            
         build_lru_cache(
-            top_prefix_n=args.top_prefixes,
-            top_followup_n=args.top_followups,
+            top_prefix_n=args.top_prefixes_n,
+            top_followup_n=args.top_followups_n,
             prefix_db_path=args.prefix_db_path,
             followup_db_path=args.followup_db_path,
-            prefix_len=args.key_len,
-            followup_len=args.val_len,
+            prefix_len=args.prefix_len,
+            followup_len=args.followup_len,
             output_path=args.output_path
         )
-    else:
-        raise ValueError(f"Invalid stage: {args.stage}")
-    

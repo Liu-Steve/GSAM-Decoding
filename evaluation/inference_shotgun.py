@@ -10,17 +10,8 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from model.shotgun.shotgun import shotgun
 from model.shotgun.lru_cache import ShotgunCache, ShotgunCacheConfig
 
-def shotgun_forward(inputs, model, tokenizer, max_new_tokens):
+def shotgun_forward(inputs, model, tokenizer, max_new_tokens, shotgun_cache):
     input_ids = inputs.input_ids
-
-    shotgun_cache = ShotgunCache([
-        ShotgunCacheConfig(
-            key_capacity=65536,
-            value_capacity=8,
-            key_token_len=2,
-            value_token_len=2,
-        )
-    ])
 
     output_ids, step, accept_length_list = shotgun(
         model,
@@ -121,10 +112,29 @@ if __name__ == "__main__":
 
     tokenizer = AutoTokenizer.from_pretrained(args.model_path)
 
+    shotgun_cache = ShotgunCache([
+        ShotgunCacheConfig(
+            prefix_capacity=2**20,
+            followup_capacity=8,
+            prefix_len=2,
+            followup_len=2,
+            file_path='openwebtext_lru_cache_key2_val2.pkl'
+        )
+    ])
+
+    forward_func = lambda inputs, model, tokenizer, max_new_tokens: \
+        shotgun_forward(
+            inputs, 
+            model, 
+            tokenizer, 
+            max_new_tokens, 
+            shotgun_cache
+        )
+
     run_eval(
         model=model,
         tokenizer=tokenizer,
-        forward_func=shotgun_forward,
+        forward_func=forward_func,
         model_id=args.model_id,
         question_file=question_file,
         question_begin=args.question_begin,

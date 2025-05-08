@@ -8,7 +8,7 @@ from model.shotgun.lru_cache import ShotgunCache
 
 
 def get_draft_tokens(input_ids: np.ndarray, shotgun_cache: ShotgunCache):
-    key = input_ids[-shotgun_cache.max_key_len:]
+    key = input_ids[-shotgun_cache.max_prefix_len:]
     drafts = shotgun_cache.get_draft_tokens(key)
 
     if not drafts:
@@ -189,7 +189,7 @@ def shotgun(
 
         # Update the cache.
         cache_update_offset = uncached_prefix_len - 1
-        shotgun_cache.update_cache(prefix_ids[-shotgun_cache.max_key_value_len-cache_update_offset:])
+        shotgun_cache.update_cache(prefix_ids[-shotgun_cache.max_prefix_followup_len-cache_update_offset:])
 
         # Check termination conditions.
         if (accepted_ids == eos_token_id).any() or (next_tok_id == eos_token_id):

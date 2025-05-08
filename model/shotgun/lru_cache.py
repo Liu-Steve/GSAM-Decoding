@@ -179,15 +179,15 @@ class ShotgunCacheConfig:
         self,
         prefix_capacity: int,
         followup_capacity: int,
-        prefix_token_len: int,
-        followup_token_len: int,
+        prefix_len: int,
+        followup_len: int,
         file_path: Optional[str] = None,
         frozen: bool = False,
     ) -> None:
         self._prefix_capacity = prefix_capacity
         self._followup_capacity = followup_capacity
-        self._prefix_token_len = prefix_token_len
-        self._followup_token_len = followup_token_len
+        self._prefix_len = prefix_len
+        self._followup_len = followup_len
         self._file_path = file_path
         self._frozen = frozen
 
@@ -201,17 +201,17 @@ class ShotgunCache:
         for config in configs:
             if config._file_path:
                 cache = TwoLevelLRUCache.load_from_file(config._file_path, config._frozen)
-                if cache._prefix_len != config._prefix_token_len:
+                if cache._prefix_len != config._prefix_len:
                     raise ValueError(
                         f"Cache prefix length mismatch. "
-                        f"Expected {config._prefix_token_len}, "
+                        f"Expected {config._prefix_len}, "
                         f"got {cache._prefix_len} "
                         f"from file {config._file_path}"
                     )
-                if cache._followup_len != config._followup_token_len:
+                if cache._followup_len != config._followup_len:
                     raise ValueError(
                         f"Cache followup length mismatch. "
-                        f"Expected {config._followup_token_len}, "
+                        f"Expected {config._followup_len}, "
                         f"got {cache._followup_len} "
                         f"from file {config._file_path}"
                     )
@@ -224,13 +224,13 @@ class ShotgunCache:
                     TwoLevelLRUCache(
                         config._prefix_capacity,
                         config._followup_capacity,
-                        config._prefix_token_len,
-                        config._followup_token_len,
+                        config._prefix_len,
+                        config._followup_len,
                     )
                 )
 
-        self._prefix_lens = [config._prefix_token_len for config in configs]
-        self._followup_lens = [config._followup_token_len for config in configs]
+        self._prefix_lens = [config._prefix_len for config in configs]
+        self._followup_lens = [config._followup_len for config in configs]
         self.max_prefix_len = max(self._prefix_lens)
         self.max_followup_len = max(self._followup_lens)
         self.max_prefix_followup_len = self.max_prefix_len + self.max_followup_len

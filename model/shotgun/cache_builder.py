@@ -14,7 +14,7 @@ import random
 
 
 _FAST_PRAGMAS = """
-    PRAGMA journal_mode=WAL;
+    PRAGMA journal_mode = WAL;
     PRAGMA synchronous  = OFF;
     PRAGMA temp_store   = MEMORY;
     PRAGMA cache_size   = -1048576;          -- 1 GiB page cache (negative -> KiB)
@@ -437,9 +437,6 @@ def _merge_two_dbs(
         cur_out.execute("DETACH DATABASE db1")
         cur_out.execute("DETACH DATABASE db2")
         
-        # Vacuum the database to optimize storage
-        cur_out.execute("VACUUM")
-        
     except Exception as e:
         # Rollback if there's an error
         cur_out.execute("ROLLBACK")
@@ -741,17 +738,17 @@ def get_top_followups(
         top_n: int,
         prefix_len: int,
         followup_len: int,
-        top_prefixes: Sequence[Tuple[int, ...]],
+        top_prefixes: List[Tuple[int, ...]],
         db_path: str
     ) -> Dict[Tuple[int, ...], List[Tuple[Tuple[int, ...], int]]]:
     """
     Get the top M followups for each prefix from a pre-built database.
 
     Args:
+    - `top_n`: Number of top followups to return per prefix.
     - `prefix_len`: Length of prefix.
     - `followup_len`: Length of followup.
-    - `prefixes`: Sequence of prefixes to get followups for.
-    - `M`: Number of top followups to return per prefix.
+    - `top_prefixes`: List of prefixes to get followups for.
     - `db_path`: Path to the database containing followup counts.
 
     Returns:
@@ -759,17 +756,33 @@ def get_top_followups(
     """
     schema = _generate_schema_followup_counts(prefix_len, followup_len)
     with _open_db(db_path, schema) as conn:
+        # Configure SQLite to use temp files instead of memory for temp storage
+        conn.execute("PRAGMA temp_store = FILE;")
+        
+        # Limit memory usage to 32GB (negative means KB)
+        conn.execute("PRAGMA cache_size = -33554432;")  # 32GB
+        
+        # Create an index on prefix columns if it doesn't exist already
+        prefix_cols = [f"p{i+1}" for i in range(prefix_len)]
+        index_name = f"idx_prefix_{prefix_len}"
+        prefix_cols_str = ", ".join(prefix_cols)
+        
+        conn.execute(f"CREATE INDEX IF NOT EXISTS {index_name} ON followup_counts ({prefix_cols_str});")
+        # Analyze to make sure the index is used effectively
+        conn.execute("ANALYZE;")
+        
+        # Set to query-only mode for faster reads AFTER creating the index
+        conn.execute("PRAGMA query_only = ON;")
 
         # Fetch results
         cur = conn.cursor()
         out: Dict[Tuple[int, ...], List[Tuple[Tuple[int, ...], int]]] = {}
         
-        prefix_cols = [f"p{i+1}" for i in range(prefix_len)]
         followup_cols = [f"s{i+1}" for i in range(followup_len)]
         prefix_where = " AND ".join(f"{col} = ?" for col in prefix_cols)
         followup_col_str = ", ".join(followup_cols)
         
-        for p in top_prefixes:
+        for p in tqdm(top_prefixes, desc="Getting top followups"):
             cur.execute(
                 f"SELECT {followup_col_str}, cnt FROM followup_counts "
                 f"WHERE {prefix_where} ORDER BY cnt DESC LIMIT ?", 
@@ -943,13 +956,15 @@ def build_lru_cache(
     # Create a TwoLevelLRUCache
     cache = TwoLevelLRUCache(
         prefix_capacity=top_prefix_n,
-        followup_capacity=top_followup_n
+        followup_capacity=top_followup_n,
+        prefix_len=prefix_len,
+        followup_len=followup_len,
     )
     
     # Populate the cache with prefixes and followups
     # Since top_prefixes is already sorted in descending order of frequency,
     # we need to insert them in reverse order so the most frequent becomes most recently used
-    for prefix in reversed(top_prefixes):
+    for prefix in tqdm(reversed(top_prefixes), desc="Populating cache", total=len(top_prefixes)):
         followup_list = followups_dict.get(prefix, [])
         
         # Since followup_list is already sorted by frequency in descending order,

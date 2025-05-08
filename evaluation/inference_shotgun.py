@@ -1,10 +1,9 @@
 import argparse
-
+import copy
 from evaluation.eval import run_eval, reorg_answer_file
 
 from fastchat.utils import str_to_torch_dtype
 
-from transformers import StoppingCriteriaList, MaxLengthCriteria
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from model.shotgun.shotgun import shotgun
@@ -178,8 +177,21 @@ if __name__ == "__main__":
     # Initialize shotgun cache with user provided configurations
     shotgun_cache = ShotgunCache(args.cache_configs)
 
-    forward_func = lambda inputs, model, tokenizer, max_new_tokens: \
-        shotgun_forward(
+    # Create a deep copy of the shotgun cache for warmup runs
+    shotgun_running_cache = shotgun_cache
+    shotgun_warmup_cache = copy.deepcopy(shotgun_cache)
+
+    warmup_left_cnt = 3
+
+    def forward_func(inputs, model, tokenizer, max_new_tokens):
+        global warmup_left_cnt
+        if warmup_left_cnt > 0:
+            shotgun_cache = shotgun_warmup_cache
+            warmup_left_cnt -= 1
+        else:
+            shotgun_cache = shotgun_running_cache
+
+        return shotgun_forward(
             inputs, 
             model, 
             tokenizer, 

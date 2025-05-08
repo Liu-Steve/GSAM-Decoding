@@ -10,6 +10,57 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from model.shotgun.shotgun import shotgun
 from model.shotgun.lru_cache import ShotgunCache, ShotgunCacheConfig
 
+class ParseCacheConfigAction(argparse.Action):
+    def __call__(self, parser, namespace, values, option_string=None):
+        
+        def parse_int(value, param_name):
+            try:
+                return int(value)
+            except ValueError:
+                raise ValueError(f"{param_name} must be an integer, got '{value}'")
+        
+        def parse_bool(value, param_name):
+            value_lower = value.lower()
+            if value_lower not in ('true', 'false'):
+                raise ValueError(f"{param_name} must be either 'true' or 'false', got '{value}'")
+            return value_lower == 'true'
+
+        # Initialize cache configs if not already present
+        if not hasattr(namespace, 'cache_configs'):
+            namespace.cache_configs = []
+        
+        # Check if we have at least the required arguments
+        if len(values) < 4:
+            raise ValueError("Cache config requires at least 4 arguments: prefix_capacity, followup_capacity, prefix_len, followup_len")
+        
+        # Parse the required arguments
+        prefix_capacity = parse_int(values[0], "prefix_capacity")
+        followup_capacity = parse_int(values[1], "followup_capacity")
+        prefix_len = parse_int(values[2], "prefix_len")
+        followup_len = parse_int(values[3], "followup_len")
+        
+        # Parse optional arguments
+        file_path = None
+        frozen = False
+        
+        if len(values) >= 5:
+            file_path = values[4]
+        
+        if len(values) >= 6:
+            frozen = parse_bool(values[5], "frozen")
+        
+        config = ShotgunCacheConfig(
+            prefix_capacity=prefix_capacity,
+            followup_capacity=followup_capacity,
+            prefix_len=prefix_len,
+            followup_len=followup_len,
+            file_path=file_path,
+            frozen=frozen
+        )
+        
+        namespace.cache_configs.append(config)
+
+
 def shotgun_forward(inputs, model, tokenizer, max_new_tokens, shotgun_cache):
     input_ids = inputs.input_ids
 
@@ -91,6 +142,18 @@ if __name__ == "__main__":
         choices=["float32", "float64", "float16", "bfloat16"],
         help="Override the default dtype. If not set, it will use float16 on GPU.",
     )
+    
+    # Add shotgun cache configuration arguments
+    parser.add_argument(
+        "--cache-config",
+        action=ParseCacheConfigAction,
+        nargs='+',
+        required=True,
+        metavar="CONFIG_VALUE",
+        help="Specify cache configuration(s). Format: "
+             "prefix_capacity followup_capacity prefix_len followup_len [file_path] [frozen]. "
+             "Optional values: file_path(default=None) frozen(default=false).",
+    )
 
     args = parser.parse_args()
 
@@ -112,15 +175,8 @@ if __name__ == "__main__":
 
     tokenizer = AutoTokenizer.from_pretrained(args.model_path)
 
-    shotgun_cache = ShotgunCache([
-        ShotgunCacheConfig(
-            prefix_capacity=2**20,
-            followup_capacity=8,
-            prefix_len=2,
-            followup_len=2,
-            file_path='openwebtext_lru_cache_key2_val2.pkl'
-        )
-    ])
+    # Initialize shotgun cache with user provided configurations
+    shotgun_cache = ShotgunCache(args.cache_configs)
 
     forward_func = lambda inputs, model, tokenizer, max_new_tokens: \
         shotgun_forward(

@@ -199,3 +199,120 @@ def shotgun(
 
     final_ids = torch.from_numpy(prefix_ids[:max_length]).unsqueeze(0).to(device)
     return final_ids, step, accept_length_list
+
+
+@torch.no_grad()
+def shotgun_batched(
+    model: torch.nn.Module,
+    input_ids: torch.LongTensor,
+    max_length: int,
+    eos_token_id: int,
+    shotgun_cache: ShotgunCache,
+    **model_kwargs,
+):
+    device = input_ids.device
+    accept_length_list = []
+    model_kwargs["past_key_values"] = None
+    model_kwargs["use_cache"] = True
+
+    prefix_ids = input_ids.detach().cpu().numpy().squeeze(0)
+    prefix_len = prefix_ids.shape[0]
+    # uncached_prefix_len = prefix_len
+    # prefix_poss = np.arange(prefix_len)
+    shotgun_cache.update_cache(prefix_ids)
+
+    # Prepare prefill inputs.
+    position_ids = np.arange(prefix_len)
+    position_ids = torch.from_numpy(position_ids).to(device).unsqueeze(0)
+    attention_mask = torch.ones_like(position_ids)
+    model_kwargs["input_ids"] = torch.from_numpy(prefix_ids).to(device).unsqueeze(0)
+    model_kwargs["position_ids"] = position_ids
+    model_kwargs["attention_mask"] = attention_mask
+
+    # Prefill to get the logits for the next token.
+    model_inputs = model.prepare_inputs_for_generation(**model_kwargs)
+    model_outputs = model(**model_inputs, return_dict=True)
+    logits = model_outputs.logits[0, -1]
+    next_tok_id = logits.argmax(dim=-1).detach().cpu().numpy()
+
+    # Store KV cache.
+    past_key_values = model_outputs.past_key_values
+
+    for step in count(start=1):
+        # Query the cache table to get the draft tokens.
+        drafts = get_draft_tokens(prefix_ids, shotgun_cache)
+        num_drafts = drafts.shape[0]
+        draft_len = drafts.shape[1]
+
+        # Prepend next_tok_id before each row of drafts
+        # Create a new array with one more column to accommodate next_tok_id
+        augmented_drafts = np.empty((num_drafts, draft_len + 1), dtype=drafts.dtype)
+        
+        # Set the first column to next_tok_id for all rows
+        augmented_drafts[:, 0] = next_tok_id
+        
+        # Copy the original drafts into the remaining columns
+        augmented_drafts[:, 1:] = drafts
+        
+        # Update drafts and draft_len to use the augmented version
+        drafts = augmented_drafts
+        draft_len = drafts.shape[1]
+        model_kwargs["input_ids"] = torch.from_numpy(drafts).to(device)
+
+        position_ids = np.arange(prefix_len, prefix_len + draft_len)
+        position_ids = torch.from_numpy(position_ids).to(device).unsqueeze(0)
+        model_kwargs["position_ids"] = position_ids
+        
+        mask = torch.ones((num_drafts, 1)).to(device)
+        model_kwargs["attention_mask"] = mask
+        
+        past_key_values = tuple(
+            (k.expand(num_drafts, *k.shape[1:]), v.expand(num_drafts, *v.shape[1:]))
+            for (k, v) in past_key_values
+        )
+        model_kwargs["past_key_values"] = past_key_values
+
+        model_inputs = model.prepare_inputs_for_generation(**model_kwargs)
+        model_outputs = model(**model_inputs, return_dict=True)
+        logits = model_outputs.logits[:, -draft_len:, :].detach().cpu().numpy()
+        sampled_tok_ids = logits.argmax(axis=-1)
+        next_tok_id = logits[0, 0].argmax(axis=-1).item()
+
+        # Calculate the number of matching tokens between the sampled tokens and the speculation drafts.
+        mismatch = drafts[:, 1:] != sampled_tok_ids[:, :-1]
+        accept_nums = (mismatch.cumsum(axis=1) < 1).sum(axis=1)
+
+        # Take the speculation draft with the most matching tokens.
+        max_accept_idx = accept_nums.argmax()
+        max_accept_num = accept_nums[max_accept_idx]
+        accepted_ids = drafts[max_accept_idx, :max_accept_num+1]
+
+        accept_length_list.append(int(max_accept_num) + 1)
+        
+        prefix_ids = np.concatenate((prefix_ids, accepted_ids))
+        prefix_len = prefix_ids.shape[0]
+        next_tok_id = sampled_tok_ids[max_accept_idx, max_accept_num]
+        
+        # Update the KV cache.
+        past_key_values = model_outputs.past_key_values
+        past_key_values = tuple(
+            (k[max_accept_idx:max_accept_idx+1].contiguous(),
+            v[max_accept_idx:max_accept_idx+1].contiguous())
+            for (k, v) in past_key_values
+        )
+        past_key_values = _crop_past_key_values(
+            model,
+            past_key_values,
+            prefix_len,
+        )
+
+        shotgun_cache.update_cache(prefix_ids[-shotgun_cache.max_prefix_followup_len-max_accept_num:])
+
+        # Check termination conditions.
+        if (accepted_ids == eos_token_id).any() or (next_tok_id == eos_token_id):
+            break
+        if prefix_ids.shape[0] >= max_length:
+            break
+
+    final_ids = torch.from_numpy(prefix_ids[:max_length]).unsqueeze(0).to(device)
+    return final_ids, step, accept_length_list

@@ -116,12 +116,14 @@ def shotgun(
     accept_length_list = []
     model_kwargs["past_key_values"] = None
     model_kwargs["use_cache"] = True
+    model_kwargs["return_dict"] = True
 
-    all_tok_ids = input_ids.detach().cpu().numpy().squeeze(0).tolist()
-    prefix_ids = input_ids.squeeze(0)
-    prefix_len = prefix_ids.shape[0]
-    uncached_prefix_len = prefix_len
-    prefix_poss = np.arange(prefix_len)
+    uncached_prefix_ids = input_ids.detach().cpu().numpy().squeeze(0)
+    uncached_prefix_len = uncached_prefix_ids.shape[0]
+    uncached_prefix_poss = np.arange(uncached_prefix_len)
+
+    all_tok_ids = uncached_prefix_ids.tolist()
+    prefix_len = len(all_tok_ids)
     shotgun_cache.update_cache(all_tok_ids)
 
     for step in count():
@@ -132,13 +134,13 @@ def shotgun(
         sum_draft_len = num_drafts * draft_len
 
         # Store the prefix and draft tokens into a single sequence.
-        draft_ids = torch.from_numpy(drafts.ravel()).to(device)
-        combined_ids = torch.cat((prefix_ids, draft_ids)).unsqueeze(0)
+        combined_ids = np.concatenate((uncached_prefix_ids, drafts.ravel()))
+        combined_ids = torch.from_numpy(combined_ids).to(device).unsqueeze(0)
         model_kwargs["input_ids"] = combined_ids
 
         # Create the position ids.
         draft_poss = np.arange(prefix_len, prefix_len + draft_len)
-        combined_poss = np.concatenate([prefix_poss] + [draft_poss] * num_drafts)
+        combined_poss = np.concatenate([uncached_prefix_poss] + [draft_poss] * num_drafts)
         combined_poss = torch.from_numpy(combined_poss).to(device).unsqueeze(0)
         model_kwargs["position_ids"] = combined_poss
 
@@ -149,8 +151,7 @@ def shotgun(
         model_kwargs["attention_mask"] = mask
 
         # Invoke the model to get the logits.
-        model_inputs = model.prepare_inputs_for_generation(**model_kwargs)
-        model_outputs = model(**model_inputs, return_dict=True)
+        model_outputs = model(**model_kwargs)
         logits = model_outputs.logits[:, -sum_draft_len-1:]
 
         # Sample the next token.
@@ -173,10 +174,8 @@ def shotgun(
         accepted_ids = sampled_tok_ids[max_accept_idx, :max_accept_num]
 
         # Form the new prefix by concatenating the ground truth token and the accepted speculation draft.
-        all_tok_ids.append(next_tok_id)
-        all_tok_ids.extend(accepted_ids.tolist())
-        prefix_ids = np.concatenate(([next_tok_id], accepted_ids))
-        prefix_ids = torch.from_numpy(prefix_ids).to(device)
+        uncached_prefix_ids = np.concatenate(([next_tok_id], accepted_ids))
+        all_tok_ids.extend(uncached_prefix_ids)
 
         # Crop the KV cache. Keep only the tokens that were in the prefix.
         model_kwargs["past_key_values"] = _crop_past_key_values(
@@ -186,10 +185,10 @@ def shotgun(
         )
 
         # Update the length of the accepted sequence.
-        uncached_prefix_len = len(all_tok_ids) - prefix_len
-        accept_length_list.append(uncached_prefix_len)
+        uncached_prefix_len = uncached_prefix_ids.shape[0]
         prefix_len = len(all_tok_ids)
-        prefix_poss = np.arange(prefix_len - uncached_prefix_len, prefix_len)
+        accept_length_list.append(uncached_prefix_len)
+        uncached_prefix_poss = np.arange(prefix_len - uncached_prefix_len, prefix_len)
 
         # Update the cache.
         cache_update_offset = uncached_prefix_len - 1

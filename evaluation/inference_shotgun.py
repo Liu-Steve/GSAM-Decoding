@@ -67,7 +67,6 @@ def shotgun_forward(inputs, model, tokenizer, max_new_tokens, shotgun_cache):
         model,
         input_ids, 
         max_length=len(input_ids[0])+max_new_tokens,
-        pad_token_id=tokenizer.pad_token_id,
         eos_token_id=tokenizer.eos_token_id,
         shotgun_cache=shotgun_cache,
     )

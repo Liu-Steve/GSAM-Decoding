@@ -235,7 +235,7 @@ class ShotgunCache:
         self.max_followup_len = max(self._followup_lens)
         self.max_prefix_followup_len = self.max_prefix_len + self.max_followup_len
 
-    def get_draft_tokens(self, prefix: np.ndarray) -> list[Tokens]:
+    def get_draft_tokens(self, prefix: list[int]) -> list[Tokens]:
         """
         Retrieves draft tokens from all caches for the given `prefix`.
         
@@ -258,7 +258,7 @@ class ShotgunCache:
             for draft in drafts
         ]
 
-    def update_cache(self, token_ids: np.ndarray) -> None:
+    def update_cache(self, token_ids: list[int]) -> None:
         """
         Updates the cache with the given token IDs.
 

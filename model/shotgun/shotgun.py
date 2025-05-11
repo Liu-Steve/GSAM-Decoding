@@ -7,17 +7,17 @@ from transformers.generation.utils import _crop_past_key_values
 from model.shotgun.lru_cache import ShotgunCache
 
 
-def get_draft_tokens(input_ids: np.ndarray, shotgun_cache: ShotgunCache):
+def get_draft_tokens(input_ids: list[int], shotgun_cache: ShotgunCache):
     key = input_ids[-shotgun_cache.max_prefix_len:]
     drafts = shotgun_cache.get_draft_tokens(key)
 
     if not drafts:
-        return np.array([[]], dtype=input_ids.dtype)
+        return np.array([[]], dtype=np.int64)
 
     num_drafts = len(drafts)
     draft_len = max(len(draft) for draft in drafts)
 
-    draft_matrix = np.zeros((num_drafts, draft_len), dtype=input_ids.dtype)
+    draft_matrix = np.zeros((num_drafts, draft_len), dtype=np.int64)
     for i, draft in enumerate(drafts):
         draft_matrix[i, :len(draft)] = draft
     return draft_matrix
@@ -117,22 +117,23 @@ def shotgun(
     model_kwargs["past_key_values"] = None
     model_kwargs["use_cache"] = True
 
-    prefix_ids = input_ids.detach().cpu().numpy().squeeze(0)
+    all_tok_ids = input_ids.detach().cpu().numpy().squeeze(0).tolist()
+    prefix_ids = input_ids.squeeze(0)
     prefix_len = prefix_ids.shape[0]
     uncached_prefix_len = prefix_len
     prefix_poss = np.arange(prefix_len)
-    shotgun_cache.update_cache(prefix_ids)
+    shotgun_cache.update_cache(all_tok_ids)
 
     for step in count():
         # Query the cache table to get the draft tokens.
-        drafts = get_draft_tokens(prefix_ids, shotgun_cache)
+        drafts = get_draft_tokens(all_tok_ids, shotgun_cache)
         num_drafts = drafts.shape[0]
         draft_len = drafts.shape[1]
         sum_draft_len = num_drafts * draft_len
 
         # Store the prefix and draft tokens into a single sequence.
-        combined_ids = np.concatenate((prefix_ids, drafts.ravel()))
-        combined_ids = torch.from_numpy(combined_ids).unsqueeze(0).to(device)
+        draft_ids = torch.from_numpy(drafts.ravel()).to(device)
+        combined_ids = torch.cat((prefix_ids, draft_ids)).unsqueeze(0)
         model_kwargs["input_ids"] = combined_ids
 
         # Create the position ids.
@@ -172,7 +173,10 @@ def shotgun(
         accepted_ids = sampled_tok_ids[max_accept_idx, :max_accept_num]
 
         # Form the new prefix by concatenating the ground truth token and the accepted speculation draft.
-        prefix_ids = np.concatenate((prefix_ids, [next_tok_id], accepted_ids))
+        all_tok_ids.append(next_tok_id)
+        all_tok_ids.extend(accepted_ids.tolist())
+        prefix_ids = np.concatenate(([next_tok_id], accepted_ids))
+        prefix_ids = torch.from_numpy(prefix_ids).to(device)
 
         # Crop the KV cache. Keep only the tokens that were in the prefix.
         model_kwargs["past_key_values"] = _crop_past_key_values(
@@ -182,22 +186,22 @@ def shotgun(
         )
 
         # Update the length of the accepted sequence.
-        uncached_prefix_len = prefix_ids.shape[0] - prefix_len
+        uncached_prefix_len = len(all_tok_ids) - prefix_len
         accept_length_list.append(uncached_prefix_len)
-        prefix_len = prefix_ids.shape[0]
+        prefix_len = len(all_tok_ids)
         prefix_poss = np.arange(prefix_len - uncached_prefix_len, prefix_len)
 
         # Update the cache.
         cache_update_offset = uncached_prefix_len - 1
-        shotgun_cache.update_cache(prefix_ids[-shotgun_cache.max_prefix_followup_len-cache_update_offset:])
+        shotgun_cache.update_cache(all_tok_ids[-shotgun_cache.max_prefix_followup_len-cache_update_offset:])
 
         # Check termination conditions.
         if (accepted_ids == eos_token_id).any() or (next_tok_id == eos_token_id):
             break
-        if prefix_ids.shape[0] >= max_length:
+        if len(all_tok_ids) >= max_length:
             break
 
-    final_ids = torch.from_numpy(prefix_ids[:max_length]).unsqueeze(0).to(device)
+    final_ids = torch.tensor(all_tok_ids[:max_length], dtype=torch.long, device=device).unsqueeze(0)
     return final_ids, step, accept_length_list
 
 

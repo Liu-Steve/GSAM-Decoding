@@ -991,10 +991,10 @@ def _validate_args(args):
     """
     # Stage-specific required args (only listing optional args that are required for specific stages)
     required_args = {
-        "count-kgram": ["model_path", "db_dir"],
-        "merge-kgram": ["db_dir", "num_prev_workers"],
-        "count-followup": ["model_path", "db_dir", "followup_len", "top_ngrams"],
-        "merge-followup": ["db_dir", "num_prev_workers", "followup_len"],
+        "count-kgram": ["dataset", "model_path", "db_dir"],
+        "merge-kgram": ["dataset", "db_dir", "num_prev_workers"],
+        "count-followup": ["dataset", "model_path", "db_dir", "followup_len", "top_ngrams"],
+        "merge-followup": ["dataset", "db_dir", "num_prev_workers", "followup_len"],
         "build-lru-cache": ["followup_len", "top_prefixes_n", "top_followups_n", "output_path", "prefix_db_path", "followup_db_path"]
     }
     
@@ -1022,7 +1022,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--dataset",
         type=str,
-        required=True,
+        default=None,
     )
     parser.add_argument(
         "--model-path",

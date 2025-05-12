@@ -12,8 +12,7 @@ def get_draft_tokens(
         uncached_prefix_len: int,
         shotgun_cache: ShotgunCache
 ) -> tuple[np.ndarray, list[int]]:
-    key = prefix_ids[-shotgun_cache.max_prefix_len:]
-    drafts, drafts_lens = shotgun_cache.get_draft_tokens(key)
+    drafts, drafts_lens = shotgun_cache.get_draft_tokens(prefix_ids)
 
     sum_drafts_len = sum(drafts_lens)
     drafts_ids = np.empty((uncached_prefix_len+sum_drafts_len,), dtype=np.int64)

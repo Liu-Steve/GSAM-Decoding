@@ -235,7 +235,7 @@ class ShotgunCache:
         self.max_followup_len = max(self._followup_lens)
         self.max_prefix_followup_len = self.max_prefix_len + self.max_followup_len
 
-    def get_draft_tokens(self, prefix: list[int]) -> list[Tokens]:
+    def get_draft_tokens(self, prefix: list[int]) -> tuple[list[Tokens], list[int]]:
         """
         Retrieves draft tokens from all caches for the given `prefix`.
         
@@ -244,19 +244,19 @@ class ShotgunCache:
           a prefix of length `k`, then the last `k` tokens of `prefix` will be used as the prefix.
             
         Returns:
-            A list of draft tokens if any cache has a match, or an empty list if no matches found.
+        - A list of draft tokens if any cache has a match, or an empty list if no matches found.
+        - A list of the lengths of the draft tokens.
         """
-        drafts_list = [
-            drafts
-            for cache, prefix_len in zip(self._caches, self._prefix_lens)
-            if (drafts := cache.get(tuple(prefix[-prefix_len:]))) is not None
-        ]
 
-        return [
-            draft
-            for drafts in drafts_list
-            for draft in drafts
-        ]
+        drafts_list = []
+        drafts_lens = []
+        for cache, prefix_len, followup_len in zip(self._caches, self._prefix_lens, self._followup_lens):
+            drafts = cache.get(tuple(prefix[-prefix_len:]))
+            if drafts is not None:
+                drafts_list.extend(drafts)
+                drafts_lens.extend((followup_len,) * len(drafts))
+        
+        return drafts_list, drafts_lens
 
     def update_cache(self, token_ids: list[int]) -> None:
         """

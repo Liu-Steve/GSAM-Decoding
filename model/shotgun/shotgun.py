@@ -7,20 +7,23 @@ from transformers.generation.utils import _crop_past_key_values
 from model.shotgun.lru_cache import ShotgunCache
 
 
-def get_draft_tokens(input_ids: list[int], shotgun_cache: ShotgunCache):
-    key = input_ids[-shotgun_cache.max_prefix_len:]
-    drafts = shotgun_cache.get_draft_tokens(key)
+def get_draft_tokens(
+        prefix_ids: list[int],
+        uncached_prefix_len: int,
+        shotgun_cache: ShotgunCache
+) -> tuple[np.ndarray, list[int]]:
+    key = prefix_ids[-shotgun_cache.max_prefix_len:]
+    drafts, drafts_lens = shotgun_cache.get_draft_tokens(key)
 
-    if not drafts:
-        return np.array([[]], dtype=np.int64)
+    sum_drafts_len = sum(drafts_lens)
+    drafts_ids = np.empty((uncached_prefix_len+sum_drafts_len,), dtype=np.int64)
 
-    num_drafts = len(drafts)
-    draft_len = max(len(draft) for draft in drafts)
+    offset = uncached_prefix_len
+    for draft, draft_len in zip(drafts, drafts_lens):
+        drafts_ids[offset:offset+draft_len] = draft
+        offset += draft_len
 
-    draft_matrix = np.zeros((num_drafts, draft_len), dtype=np.int64)
-    for i, draft in enumerate(drafts):
-        draft_matrix[i, :len(draft)] = draft
-    return draft_matrix
+    return drafts_ids, drafts_lens, sum_drafts_len
 
 
 def make_4d_attention_mask(
@@ -128,25 +131,26 @@ def shotgun(
 
     for step in count():
         # Query the cache table to get the draft tokens.
-        drafts = get_draft_tokens(all_tok_ids, shotgun_cache)
-        num_drafts = drafts.shape[0]
-        draft_len = drafts.shape[1]
-        sum_draft_len = num_drafts * draft_len
+        # The first `uncached_prefix_len` tokens in `drafts_ids` will later
+        # be filled by the uncached prefix tokens. Drafts tokens follow them.
+        drafts_ids, drafts_lens, sum_draft_len = get_draft_tokens(all_tok_ids, uncached_prefix_len, shotgun_cache)
 
         # Store the prefix and draft tokens into a single sequence.
-        combined_ids = np.concatenate((uncached_prefix_ids, drafts.ravel()))
+        combined_ids = drafts_ids
+        combined_ids[:uncached_prefix_len] = uncached_prefix_ids
         combined_ids = torch.from_numpy(combined_ids).to(device).unsqueeze(0)
         model_kwargs["input_ids"] = combined_ids
 
         # Create the position ids.
-        draft_poss = np.arange(prefix_len, prefix_len + draft_len)
-        combined_poss = np.concatenate([uncached_prefix_poss] + [draft_poss] * num_drafts)
+        combined_poss = uncached_prefix_poss
+        for draft_len in drafts_lens:
+            combined_poss = np.concatenate([combined_poss, np.arange(prefix_len, prefix_len + draft_len)])
         combined_poss = torch.from_numpy(combined_poss).to(device).unsqueeze(0)
         model_kwargs["position_ids"] = combined_poss
 
         # Create the attention mask where each draft attends to the prefix and
         # to earlier positions within its own draft but not to other drafts.
-        mask = make_4d_attention_mask(prefix_len - uncached_prefix_len, uncached_prefix_len, [draft_len] * num_drafts)
+        mask = make_4d_attention_mask(prefix_len - uncached_prefix_len, uncached_prefix_len, drafts_lens)
         mask = torch.from_numpy(mask).to(device)
         model_kwargs["attention_mask"] = mask
 
@@ -156,25 +160,40 @@ def shotgun(
 
         # Sample the next token.
         # next_tok_id is the ground truth token to be added to the prefix.
-        # sampled_tok_ids is reshaped to be a 2D array of shape (num_drafts, draft_len)
+        # sampled_ids is reshaped to be a 2D array of shape (num_drafts, draft_len)
         # for further verification.
-        sampled_tok_ids = logits.argmax(dim=-1).detach().cpu().numpy().squeeze(0)
-        next_tok_id = sampled_tok_ids[0]
-        sampled_tok_ids = sampled_tok_ids[1:].reshape((num_drafts, draft_len))
-        
-        # Calculate the number of matching tokens between the sampled tokens and the speculation drafts.
-        mismatch = np.empty_like(drafts, dtype=bool)
-        mismatch[:, :1] = drafts[:, :1] != next_tok_id
-        mismatch[:, 1:] = drafts[:, 1:] != sampled_tok_ids[:, :-1]
-        accept_nums = (mismatch.cumsum(axis=1) < 1).sum(axis=1)
+        sampled_ids = logits.argmax(dim=-1).detach().cpu().numpy().squeeze(0)
+        next_id = sampled_ids[0]
+        sampled_ids = sampled_ids[1:]
 
-        # Take the speculation draft with the most matching tokens.
-        max_accept_idx = accept_nums.argmax()
-        max_accept_num = accept_nums[max_accept_idx]
-        accepted_ids = sampled_tok_ids[max_accept_idx, :max_accept_num]
+        # Calculate the number of matching tokens between the sampled tokens and the speculation drafts.
+        # Find the speculation draft with the most matching tokens.
+        max_accept_num = 0
+        max_accepted_ids = np.array([], dtype=np.int64)
+        draft_offset = uncached_prefix_len
+        sample_offset = 0
+        for draft_len in drafts_lens:
+            draft = drafts_ids[draft_offset:draft_offset+draft_len]
+            sampled = sampled_ids[sample_offset:sample_offset+draft_len]
+            draft_offset += draft_len
+            sample_offset += draft_len
+
+            # Verify the first token in the draft.
+            if draft[0] != next_id:
+                continue
+            accept_num = 1
+
+            # Verify the rest of the draft.
+            mismatch = draft[1:] != sampled[:-1]
+            accept_num += (mismatch.cumsum(axis=0) < 1).sum(axis=0)
+
+            # Update the longest matching draft.
+            if accept_num > max_accept_num:
+                max_accept_num = accept_num
+                max_accepted_ids = sampled[:max_accept_num]
 
         # Form the new prefix by concatenating the ground truth token and the accepted speculation draft.
-        uncached_prefix_ids = np.concatenate(([next_tok_id], accepted_ids))
+        uncached_prefix_ids = np.concatenate(([next_id], max_accepted_ids))
         all_tok_ids.extend(uncached_prefix_ids)
 
         # Crop the KV cache. Keep only the tokens that were in the prefix.
@@ -195,7 +214,7 @@ def shotgun(
         shotgun_cache.update_cache(all_tok_ids[-shotgun_cache.max_prefix_followup_len-cache_update_offset:])
 
         # Check termination conditions.
-        if (accepted_ids == eos_token_id).any() or (next_tok_id == eos_token_id):
+        if (max_accepted_ids == eos_token_id).any() or (next_id == eos_token_id):
             break
         if len(all_tok_ids) >= max_length:
             break

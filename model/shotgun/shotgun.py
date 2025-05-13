@@ -7,102 +7,229 @@ from transformers.generation.utils import _crop_past_key_values
 from model.shotgun.lru_cache import ShotgunCache
 
 
-def get_draft_tokens(
+def recursive_get_draft_tokens(
         prefix_ids: list[int],
-        uncached_prefix_len: int,
-        shotgun_cache: ShotgunCache
-) -> tuple[np.ndarray, list[int]]:
-    drafts, drafts_lens = shotgun_cache.get_draft_tokens(prefix_ids)
+        prefix_tree_node,
+        remaining_depth,
+        shotgun_cache: ShotgunCache,
+        max_total_drafts_len: int,
+):
+    prefix_ids.extend(prefix_tree_node[0])
 
-    sum_drafts_len = sum(drafts_lens)
-    drafts_ids = np.empty((uncached_prefix_len+sum_drafts_len,), dtype=np.int64)
+    remain_total_drafts_len = max_total_drafts_len
 
-    offset = uncached_prefix_len
-    for draft, draft_len in zip(drafts, drafts_lens):
-        drafts_ids[offset:offset+draft_len] = draft
-        offset += draft_len
+    if remaining_depth == 0:
+        drafts, drafts_lens = shotgun_cache.get_draft_tokens(prefix_ids)
 
-    return drafts_ids, drafts_lens, sum_drafts_len
+        sum_drafts_len = 0
+        for draft, draft_len in zip(drafts, drafts_lens):
+            if remain_total_drafts_len >= draft_len:
+                prefix_tree_node[1].append(draft)
+                remain_total_drafts_len -= draft_len
+                sum_drafts_len += draft_len
+            else:
+                break
+
+    else:
+        for child in prefix_tree_node[1]:
+            remain_total_drafts_len = recursive_get_draft_tokens(
+                prefix_ids,
+                child,
+                remaining_depth - 1,
+                shotgun_cache,
+                remain_total_drafts_len
+            )
+            if remain_total_drafts_len <= 0:
+                break
+
+    # Pop the last len(prefix_tree_node[0]) items from prefix_ids
+    for _ in range(len(prefix_tree_node[0])):
+        prefix_ids.pop()
+    return remain_total_drafts_len
 
 
-def make_4d_attention_mask(
+def get_chained_draft_tokens(
+        prefix_ids: list[int],
+        shotgun_cache: ShotgunCache,
+        max_total_drafts_len: int,
+):
+    prefix_root = ((), [])
+    remain_total_drafts_len = max_total_drafts_len
+
+    depth = 0
+    while remain_total_drafts_len > 0:
+        prev_remain_total_drafts_len = remain_total_drafts_len
+        remain_total_drafts_len = recursive_get_draft_tokens(
+            prefix_ids,
+            prefix_root,
+            depth,
+            shotgun_cache,
+            remain_total_drafts_len
+        )
+
+        if prev_remain_total_drafts_len == remain_total_drafts_len:
+            break
+
+        depth += 1
+
+    sum_drafts_len = max_total_drafts_len - remain_total_drafts_len
+    return prefix_root, sum_drafts_len
+
+
+def make_chained_4d_attention_mask(
         cached_prefix_len: int,
         uncached_prefix_len: int,
-        draft_lens: list[int],
+        drafts_root,
+        sum_drafts_len: int,
         dtype: np.dtype = np.float16,
 ):
-    """
-    Build a (1, 1, query_len, total_len) causal mask where:
-    - query_len = uncached_prefix_len + sum(draft_lens)
-    - total_len = cached_prefix_len + query_len
-    - rows 0..uncached_prefix_len-1 are standard causal attention
-    - rows belonging to draft tokens can attend to all prefix positions AND
-      to earlier positions within their own draft, but not to other drafts.
+    num_rows = uncached_prefix_len + sum_drafts_len
+    num_cols = num_rows + cached_prefix_len
+    prefix_len = cached_prefix_len + uncached_prefix_len
 
-    Args:
-    - `cached_prefix_len`: `int`, length of the KV-cached prefix
-    - `uncached_prefix_len`: `int`, length of the uncached prefix
-    - `draft_lens`: `list[int]`, lengths of each draft token sequence
-    - `dtype`: `np.dtype`, desired dtype of the output mask
+    mask = np.empty((num_rows, num_cols), dtype=dtype)
+    mask[:, :prefix_len] = 1.0
+    mask[:, prefix_len:] = 0.0
 
-    Returns:
-    - `mask`: (1, 1, query_len, total_len) NumPy array of 1.0 and 0.0
+    for i in range(uncached_prefix_len):
+        mask[i, cached_prefix_len+i+1:prefix_len] = 0.0
 
-    Example:
+    row_offset = uncached_prefix_len
+    col_offset = prefix_len
 
-    For cached_prefix_len=2, uncached_prefix_len=3, draft_lens=[2,3], the resulting mask will have
-    shape (1, 1, 8, 10) with values:
-    ```
-    [[[[ 1.    1.    1.    .     .     .     .     .     .     .]     # uncached prefix row 0 
-       [ 1.    1.    1.    1.    .     .     .     .     .     .]     # uncached prefix row 1
-       [ 1.    1.    1.    1.    1.    .     .     .     .     .]     # uncached prefix row 2
-       [ 1.    1.    1.    1.    1.    1.    .     .     .     .]     # draft 1 row 0
-       [ 1.    1.    1.    1.    1.    1.    1.    .     .     .]     # draft 1 row 1  
-       [ 1.    1.    1.    1.    1.    .     .     1.    .     .]     # draft 2 row 0
-       [ 1.    1.    1.    1.    1.    .     .     1.    1.    .]     # draft 2 row 1
-       [ 1.    1.    1.    1.    1.    .     .     1.    1.    1.]]]] # draft 2 row 2
-       | cached   |    uncached     |  draft 1   |    draft 2     |
-       | prefix   |     prefix      |            |                |
-    ```
+    working_row = np.empty((num_cols,), dtype=dtype)
+    working_row[:prefix_len] = 1.0
+    working_row[prefix_len:] = 0.0
 
-    Reference:
-    https://github.com/huggingface/transformers/blob/e94a480/src/transformers/models/llama/modeling_llama.py#L664
-    """
-    sum_draft_len = sum(draft_lens)
-    query_len = uncached_prefix_len + sum_draft_len
-    total_len = cached_prefix_len + query_len
+    def recursive_mask_fill(prefix_tree_node):
+        nonlocal row_offset
+        nonlocal col_offset
 
-    # Make row and col index grids of shape (query_len, query_len).
-    seqs = np.arange(query_len)  # shape (query_len,)
-    rows = seqs[:, None] # shape (query_len, 1)
-    cols = seqs[None, :] # shape (1, query_len)
+        draft, children = prefix_tree_node
 
-    # Compute the *end* boundaries of each segment: [P, P+D1, P+D1+D2, ...].
-    query_lens = [uncached_prefix_len] + draft_lens
-    ends = np.cumsum(query_lens)
+        prev_col_offset = col_offset
 
-    # segment_id[i] = which chunk row i belongs to:
-    # prefix rows [0..P-1] -> 0
-    # draft k rows [ ends[k-1] .. ends[k]-1 ] -> k
-    segment_id = np.repeat(np.arange(len(ends)), query_lens)
-    segment_id = segment_id[:, None]  # shape (query_len, 1)
+        for _ in range(len(draft)):
+            working_row[col_offset] = 1.0
+            mask[row_offset, :] = working_row
+            row_offset += 1
+            col_offset += 1
 
-    # Compute the *start* of each segment similarly:
-    # starts = [0, P, P+D1, ...]
-    starts = np.concatenate(([0], ends[:-1]))
-    seg_start = starts[segment_id]    # shape (query_len, 1)
+        for child in children:
+            recursive_mask_fill(child)
+        
+        working_row[prev_col_offset:prev_col_offset+len(draft)] = 0.0
+    
+    recursive_mask_fill(drafts_root)
 
-    # Draft-region mask:
-    #   allow all cols < prefix_len,
-    #   plus cols in [ seg_start .. i ] (i.e. its own draft-causal)
-    draft_mask = (cols <= rows) & ((cols < uncached_prefix_len) | (cols >= seg_start))
+    return mask
 
-    # Full attention mask:
-    mask = np.empty((query_len, total_len), dtype=dtype)
-    mask[:, :cached_prefix_len] = 1.0
-    mask[:, cached_prefix_len:] = draft_mask.astype(dtype)
 
-    return mask.astype(dtype).reshape((1, 1, query_len, total_len))
+def make_chained_input_ids(
+        uncached_prefix_ids: np.ndarray,
+        drafts_root,
+        sum_drafts_len: int,
+):
+    uncached_prefix_len = uncached_prefix_ids.shape[0]
+    input_ids = np.empty((uncached_prefix_len+sum_drafts_len,), dtype=np.int64)
+    input_ids[:uncached_prefix_len] = uncached_prefix_ids
+
+    offset = uncached_prefix_len
+
+    def recursive_input_ids_fill(prefix_tree_node):
+        nonlocal offset
+
+        draft, children = prefix_tree_node
+        input_ids[offset:offset+len(draft)] = draft
+        offset += len(draft)
+
+        for child in children:
+            recursive_input_ids_fill(child)
+
+    recursive_input_ids_fill(drafts_root)
+
+    return input_ids
+
+
+def make_chained_position_ids(
+        cached_prefix_len: int,
+        uncached_prefix_len: int,
+        drafts_root,
+        sum_drafts_len: int,
+):
+    prefix_len = cached_prefix_len + uncached_prefix_len
+
+    position_ids = np.empty((uncached_prefix_len+sum_drafts_len,), dtype=np.int64)
+    position_ids[:uncached_prefix_len] = np.arange(cached_prefix_len, prefix_len)
+
+    offset = uncached_prefix_len
+    position_offset = prefix_len
+
+    def recursive_position_fill(prefix_tree_node):
+        nonlocal offset
+        nonlocal position_offset
+
+        draft, children = prefix_tree_node
+
+        position_ids[offset:offset+len(draft)] = np.arange(position_offset, position_offset+len(draft))
+        offset += len(draft)
+        position_offset += len(draft)
+
+        for child in children:
+            recursive_position_fill(child)
+        
+        position_offset -= len(draft)
+
+    recursive_position_fill(drafts_root)
+
+    return position_ids
+
+
+def verify_chained_drafts(
+        drafts_root,
+        sampled_ids,
+        next_tok,
+):
+    max_accept_num = 1
+    max_accepted_ids = [next_tok]
+    working_accepted_ids = [next_tok]
+    sample_offset = 0
+
+    def recursive_verify(prefix_tree_node, next_tok, mismatched):
+        nonlocal max_accept_num
+        nonlocal max_accepted_ids
+        nonlocal working_accepted_ids
+        nonlocal sample_offset
+
+        draft, children = prefix_tree_node
+        sample = sampled_ids[sample_offset:sample_offset+len(draft)]
+        sample_offset += len(draft)
+        matching_num = 0
+
+        if not mismatched:
+            for draft_tok, sample_tok in zip(draft, sample):
+                if draft_tok == next_tok:
+                    next_tok = sample_tok
+                    working_accepted_ids.append(sample_tok)
+                    matching_num += 1
+                else:
+                    mismatched = True
+                    break
+        
+        if children:
+            for child in children:
+                recursive_verify(child, next_tok, mismatched)
+        else:
+            if len(working_accepted_ids) > max_accept_num:
+                max_accept_num = len(working_accepted_ids)
+                max_accepted_ids = working_accepted_ids.copy()
+        
+        for _ in range(matching_num):
+            working_accepted_ids.pop()
+
+    recursive_verify(drafts_root, next_tok, False)
+
+    return max_accepted_ids
 
 
 @torch.no_grad()
@@ -122,7 +249,6 @@ def shotgun(
 
     uncached_prefix_ids = input_ids.detach().cpu().numpy().squeeze(0)
     uncached_prefix_len = uncached_prefix_ids.shape[0]
-    uncached_prefix_poss = np.arange(uncached_prefix_len)
 
     all_tok_ids = uncached_prefix_ids.tolist()
     prefix_len = len(all_tok_ids)
@@ -130,70 +256,63 @@ def shotgun(
 
     for step in count():
         # Query the cache table to get the draft tokens.
-        # The first `uncached_prefix_len` tokens in `drafts_ids` will later
-        # be filled by the uncached prefix tokens. Drafts tokens follow them.
-        drafts_ids, drafts_lens, sum_draft_len = get_draft_tokens(all_tok_ids, uncached_prefix_len, shotgun_cache)
+        drafts_root, sum_drafts_len = get_chained_draft_tokens(
+            prefix_ids=all_tok_ids,
+            shotgun_cache=shotgun_cache,
+            max_total_drafts_len=128,
+        )
 
         # Store the prefix and draft tokens into a single sequence.
-        combined_ids = drafts_ids
-        combined_ids[:uncached_prefix_len] = uncached_prefix_ids
-        combined_ids = torch.from_numpy(combined_ids).to(device).unsqueeze(0)
+        combined_ids = make_chained_input_ids(
+            uncached_prefix_ids=uncached_prefix_ids,
+            drafts_root=drafts_root,
+            sum_drafts_len=sum_drafts_len,
+        )
+        combined_ids = torch.from_numpy(combined_ids).unsqueeze(0).to(device)
         model_kwargs["input_ids"] = combined_ids
 
+
         # Create the position ids.
-        combined_poss = uncached_prefix_poss
-        for draft_len in drafts_lens:
-            combined_poss = np.concatenate([combined_poss, np.arange(prefix_len, prefix_len + draft_len)])
-        combined_poss = torch.from_numpy(combined_poss).to(device).unsqueeze(0)
+        combined_poss = make_chained_position_ids(
+            cached_prefix_len=prefix_len-uncached_prefix_len,
+            uncached_prefix_len=uncached_prefix_len,
+            drafts_root=drafts_root,
+            sum_drafts_len=sum_drafts_len,
+        )
+        combined_poss = torch.from_numpy(combined_poss).unsqueeze(0).to(device)
         model_kwargs["position_ids"] = combined_poss
 
         # Create the attention mask where each draft attends to the prefix and
         # to earlier positions within its own draft but not to other drafts.
-        mask = make_4d_attention_mask(prefix_len - uncached_prefix_len, uncached_prefix_len, drafts_lens)
-        mask = torch.from_numpy(mask).to(device)
+        mask = make_chained_4d_attention_mask(
+            cached_prefix_len=prefix_len-uncached_prefix_len,
+            uncached_prefix_len=uncached_prefix_len,
+            drafts_root=drafts_root,
+            sum_drafts_len=sum_drafts_len,
+        )
+        mask = torch.from_numpy(mask).unsqueeze(0).unsqueeze(0).to(device)
         model_kwargs["attention_mask"] = mask
 
         # Invoke the model to get the logits.
         model_outputs = model(**model_kwargs)
-        logits = model_outputs.logits[:, -sum_draft_len-1:]
+        logits = model_outputs.logits[:, -sum_drafts_len-1:]
 
         # Sample the next token.
-        # next_tok_id is the ground truth token to be added to the prefix.
-        # sampled_ids is reshaped to be a 2D array of shape (num_drafts, draft_len)
-        # for further verification.
+        # `next_id` is the ground truth token following the previously uncached prefix.
+        # `sampled_ids` stores the sampled tokens from the speculation drafts.
         sampled_ids = logits.argmax(dim=-1).detach().cpu().numpy().squeeze(0)
         next_id = sampled_ids[0]
         sampled_ids = sampled_ids[1:]
 
-        # Calculate the number of matching tokens between the sampled tokens and the speculation drafts.
         # Find the speculation draft with the most matching tokens.
-        max_accept_num = 0
-        max_accepted_ids = np.array([], dtype=np.int64)
-        draft_offset = uncached_prefix_len
-        sample_offset = 0
-        for draft_len in drafts_lens:
-            draft = drafts_ids[draft_offset:draft_offset+draft_len]
-            sampled = sampled_ids[sample_offset:sample_offset+draft_len]
-            draft_offset += draft_len
-            sample_offset += draft_len
+        accepted_ids = verify_chained_drafts(
+            drafts_root=drafts_root,
+            sampled_ids=sampled_ids,
+            next_tok=next_id,
+        )
 
-            # Verify the first token in the draft.
-            if draft[0] != next_id:
-                continue
-            accept_num = 1
-
-            # Verify the rest of the draft.
-            mismatch = draft[1:] != sampled[:-1]
-            accept_num += (mismatch.cumsum(axis=0) < 1).sum(axis=0)
-
-            # Update the longest matching draft.
-            if accept_num > max_accept_num:
-                max_accept_num = accept_num
-                max_accepted_ids = sampled[:max_accept_num]
-
-        # Form the new prefix by concatenating the ground truth token and the accepted speculation draft.
-        uncached_prefix_ids = np.concatenate(([next_id], max_accepted_ids))
-        all_tok_ids.extend(uncached_prefix_ids)
+        # Store the accepted tokens
+        all_tok_ids.extend(accepted_ids)
 
         # Crop the KV cache. Keep only the tokens that were in the prefix.
         model_kwargs["past_key_values"] = _crop_past_key_values(
@@ -203,17 +322,19 @@ def shotgun(
         )
 
         # Update the length of the accepted sequence.
-        uncached_prefix_len = uncached_prefix_ids.shape[0]
+        uncached_prefix_len = len(accepted_ids)
         prefix_len = len(all_tok_ids)
         accept_length_list.append(uncached_prefix_len)
-        uncached_prefix_poss = np.arange(prefix_len - uncached_prefix_len, prefix_len)
 
-        # Update the cache.
+        # Prepare for the next iteration.
+        uncached_prefix_ids = np.array(accepted_ids)
+
+        # Update shotgun cache.
         cache_update_offset = uncached_prefix_len - 1
         shotgun_cache.update_cache(all_tok_ids[-shotgun_cache.max_prefix_followup_len-cache_update_offset:])
 
         # Check termination conditions.
-        if (max_accepted_ids == eos_token_id).any() or (next_id == eos_token_id):
+        if (uncached_prefix_ids == eos_token_id).any() or (next_id == eos_token_id):
             break
         if len(all_tok_ids) >= max_length:
             break

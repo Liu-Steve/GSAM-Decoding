@@ -237,9 +237,8 @@ class ShotgunCache:
 
     def get_draft_tokens(
             self,
-            prefix: list[int],
-            miss_fallback: bool = False,
-        ) -> tuple[list[Tokens], list[int]]:
+            prefix: list[int]
+        ) -> tuple[list[tuple[Tokens, list[int]]], list[tuple[int, list[int]]]]:
         """
         Retrieves draft tokens from all caches for the given `prefix`.
         
@@ -257,18 +256,8 @@ class ShotgunCache:
         for cache, prefix_len, followup_len in zip(self._caches, self._prefix_lens, self._followup_lens):
             drafts = cache.get(tuple(prefix[-prefix_len:]))
             if drafts is not None:
-                drafts_list.extend(drafts)
-                drafts_lens.extend((followup_len,) * len(drafts))
-        
-        if not drafts_list and miss_fallback:
-            for fallback_len in range(1, self.max_followup_len):
-                for cache, prefix_len, followup_len in zip(self._caches, self._prefix_lens, self._followup_lens):
-                    drafts = cache.get(tuple(prefix[-prefix_len-fallback_len:-fallback_len]))
-                    if drafts is not None:
-                        for draft in drafts:
-                            if draft[:fallback_len] == tuple(prefix[-fallback_len:]):
-                                drafts_list.append(draft[fallback_len:])
-                                drafts_lens.append(followup_len-fallback_len)
+                drafts_list.extend([(draft, []) for draft in drafts])
+                drafts_lens.extend([followup_len for _ in range(len(drafts))])
         
         return drafts_list, drafts_lens
 

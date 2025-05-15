@@ -1,7 +1,7 @@
 import types
 import numpy as np
 from collections import OrderedDict
-from typing import Optional
+from typing import Optional, Any
 import pickle
 
 type Tokens = tuple[int, ...]
@@ -238,7 +238,7 @@ class ShotgunCache:
     def get_draft_tokens(
             self,
             prefix: list[int]
-        ) -> tuple[list[tuple[Tokens, list[int]]], list[tuple[int, list[int]]]]:
+        ) -> tuple[list[tuple[Tokens, list[Any]]], list[int]]:
         """
         Retrieves draft tokens from all caches for the given `prefix`.
         
@@ -256,7 +256,7 @@ class ShotgunCache:
         for cache, prefix_len, followup_len in zip(self._caches, self._prefix_lens, self._followup_lens):
             drafts = cache.get(tuple(prefix[-prefix_len:]))
             if drafts is not None:
-                drafts_list.extend([(draft, []) for draft in drafts])
+                drafts_list.extend([(draft, []) for draft in reversed(drafts)])
                 drafts_lens.extend([followup_len for _ in range(len(drafts))])
         
         return drafts_list, drafts_lens

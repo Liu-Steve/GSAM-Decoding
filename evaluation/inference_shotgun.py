@@ -60,7 +60,26 @@ class ParseCacheConfigAction(argparse.Action):
         namespace.cache_configs.append(config)
 
 
-def shotgun_forward(inputs, model, tokenizer, max_new_tokens, shotgun_cache):
+class ShotgunForwardFunc:
+    def __init__(self, shotgun_cache, chaining):
+        self.shotgun_cache = shotgun_cache
+        self.chaining = chaining
+
+    def __call__(self, inputs, model, tokenizer, max_new_tokens):
+        return shotgun_forward(
+            inputs, 
+            model, 
+            tokenizer, 
+            max_new_tokens, 
+            self.shotgun_cache,
+            self.chaining
+        )
+
+    def shotgun_finish_warmup(self):
+        pass
+
+
+def shotgun_forward(inputs, model, tokenizer, max_new_tokens, shotgun_cache, chaining):
     input_ids = inputs.input_ids
 
     output_ids, step, accept_length_list = shotgun(
@@ -69,6 +88,7 @@ def shotgun_forward(inputs, model, tokenizer, max_new_tokens, shotgun_cache):
         max_length=len(input_ids[0])+max_new_tokens,
         eos_token_id=tokenizer.eos_token_id,
         shotgun_cache=shotgun_cache,
+        chaining=chaining
     )
 
     input_len = len(input_ids[0])
@@ -140,6 +160,12 @@ if __name__ == "__main__":
         choices=["float32", "float64", "float16", "bfloat16"],
         help="Override the default dtype. If not set, it will use float16 on GPU.",
     )
+    parser.add_argument(
+        "--chaining",
+        type=bool,
+        default=True,
+        help="Whether to enable chaining.",
+    )
     
     # Add shotgun cache configuration arguments
     parser.add_argument(
@@ -176,27 +202,10 @@ if __name__ == "__main__":
     # Initialize shotgun cache with user provided configurations
     shotgun_cache = ShotgunCache(args.cache_configs)
 
-    # Create a deep copy of the shotgun cache for warmup runs
-    shotgun_running_cache = shotgun_cache
-    shotgun_warmup_cache = copy.deepcopy(shotgun_cache)
-
-    warmup_left_cnt = 3
-
-    def forward_func(inputs, model, tokenizer, max_new_tokens):
-        global warmup_left_cnt
-        if warmup_left_cnt > 0:
-            shotgun_cache = shotgun_warmup_cache
-            warmup_left_cnt -= 1
-        else:
-            shotgun_cache = shotgun_running_cache
-
-        return shotgun_forward(
-            inputs, 
-            model, 
-            tokenizer, 
-            max_new_tokens, 
-            shotgun_cache
-        )
+    forward_func = ShotgunForwardFunc(
+        shotgun_cache,
+        args.chaining
+    )
 
     run_eval(
         model=model,

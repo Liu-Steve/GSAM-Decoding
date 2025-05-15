@@ -4,76 +4,98 @@ from itertools import count
 
 from transformers.generation.utils import _crop_past_key_values
 
-from model.shotgun.lru_cache import ShotgunCache
+from model.shotgun.lru_cache import ShotgunCache, Tokens
+
+type DraftNode = tuple[Tokens, list[DraftNode]]
 
 
 def recursive_get_draft_tokens(
         prefix_ids: list[int],
-        prefix_tree_node,
-        remaining_depth,
+        draft_node: DraftNode,
+        step_until_leaf: int,
         shotgun_cache: ShotgunCache,
         max_total_drafts_len: int,
-):
-    prefix_ids.extend(prefix_tree_node[0])
+) -> tuple[int, bool, bool]:
+    draft, children = draft_node
 
-    remain_total_drafts_len = max_total_drafts_len
+    # Extend the prefix with the draft tokens in the current node.
+    prefix_ids.extend(draft)
 
-    if remaining_depth == 0:
-        drafts, drafts_lens = shotgun_cache.get_draft_tokens(prefix_ids)
+    # Keep track of the remaining number of draft tokens that can be added.
+    remain_drafts_len = max_total_drafts_len
 
-        sum_drafts_len = 0
-        for draft, draft_len in zip(drafts, drafts_lens):
-            if remain_total_drafts_len >= draft_len:
-                prefix_tree_node[1].append(draft)
-                remain_total_drafts_len -= draft_len
-                sum_drafts_len += draft_len
+    # If the remaining number of draft tokens has been exhausted.
+    full = False
+
+    # If any child node has been grown.
+    grown = False
+
+    # If the current node is a leaf node, get the draft tokens for the children.
+    if step_until_leaf == 0:
+        child_drafts, child_drafts_lens = shotgun_cache.get_draft_tokens(
+            prefix_ids)
+
+        # As long as the remaining number of draft tokens allows, add the child
+        # draft tokens to the tree.
+        for child_draft, child_draft_len in zip(child_drafts, child_drafts_lens):
+            if remain_drafts_len >= child_draft_len:
+                draft_node[1].append(child_draft)
+                remain_drafts_len -= child_draft_len
+                grown = True
             else:
+                full = True
                 break
 
+    # If the current node is not a leaf node, step down to the children.
     else:
-        for child in prefix_tree_node[1]:
-            remain_total_drafts_len = recursive_get_draft_tokens(
+        for child in children:
+            remain_drafts_len, full, child_grown = recursive_get_draft_tokens(
                 prefix_ids,
                 child,
-                remaining_depth - 1,
+                step_until_leaf - 1,
                 shotgun_cache,
-                remain_total_drafts_len
+                remain_drafts_len
             )
-            if remain_total_drafts_len <= 0:
+
+            grown = grown or child_grown
+
+            if full:
                 break
 
-    # Pop the last len(prefix_tree_node[0]) items from prefix_ids
-    for _ in range(len(prefix_tree_node[0])):
+    # Restore the prefix.
+    for _ in range(len(draft)):
         prefix_ids.pop()
-    return remain_total_drafts_len
+
+    return remain_drafts_len, full, grown
 
 
 def get_chained_draft_tokens(
         prefix_ids: list[int],
         shotgun_cache: ShotgunCache,
         max_total_drafts_len: int,
-):
-    prefix_root = ((), [])
-    remain_total_drafts_len = max_total_drafts_len
-
-    depth = 0
-    while remain_total_drafts_len > 0:
-        prev_remain_total_drafts_len = remain_total_drafts_len
-        remain_total_drafts_len = recursive_get_draft_tokens(
+        chaining: bool,
+) -> tuple[DraftNode, int]:
+    drafts_root = ((), [])
+    remain_drafts_len = max_total_drafts_len
+    
+    for step_until_leaf in count():
+        remain_drafts_len, full, grown = recursive_get_draft_tokens(
             prefix_ids,
-            prefix_root,
-            depth,
+            drafts_root,
+            step_until_leaf,
             shotgun_cache,
-            remain_total_drafts_len
+            remain_drafts_len
         )
 
-        if prev_remain_total_drafts_len == remain_total_drafts_len:
+        if full or not grown:
+            break
+        
+        # If chaining is disabled, run only the first iteration.
+        if not chaining:
             break
 
-        depth += 1
-
-    sum_drafts_len = max_total_drafts_len - remain_total_drafts_len
-    return prefix_root, sum_drafts_len
+    sum_drafts_len = max_total_drafts_len - remain_drafts_len
+    return drafts_root, sum_drafts_len
 
 
 def make_chained_4d_attention_mask(
@@ -117,9 +139,9 @@ def make_chained_4d_attention_mask(
 
         for child in children:
             recursive_mask_fill(child)
-        
+
         working_row[prev_col_offset:prev_col_offset+len(draft)] = 0.0
-    
+
     recursive_mask_fill(drafts_root)
 
     return mask
@@ -159,8 +181,10 @@ def make_chained_position_ids(
 ):
     prefix_len = cached_prefix_len + uncached_prefix_len
 
-    position_ids = np.empty((uncached_prefix_len+sum_drafts_len,), dtype=np.int64)
-    position_ids[:uncached_prefix_len] = np.arange(cached_prefix_len, prefix_len)
+    position_ids = np.empty(
+        (uncached_prefix_len+sum_drafts_len,), dtype=np.int64)
+    position_ids[:uncached_prefix_len] = np.arange(
+        cached_prefix_len, prefix_len)
 
     offset = uncached_prefix_len
     position_offset = prefix_len
@@ -171,13 +195,14 @@ def make_chained_position_ids(
 
         draft, children = prefix_tree_node
 
-        position_ids[offset:offset+len(draft)] = np.arange(position_offset, position_offset+len(draft))
+        position_ids[offset:offset+len(draft)] = np.arange(
+            position_offset, position_offset+len(draft))
         offset += len(draft)
         position_offset += len(draft)
 
         for child in children:
             recursive_position_fill(child)
-        
+
         position_offset -= len(draft)
 
     recursive_position_fill(drafts_root)
@@ -215,7 +240,7 @@ def verify_chained_drafts(
                 else:
                     mismatched = True
                     break
-        
+
         if children:
             for child in children:
                 recursive_verify(child, next_tok, mismatched)
@@ -223,7 +248,7 @@ def verify_chained_drafts(
             if len(working_accepted_ids) > max_accept_num:
                 max_accept_num = len(working_accepted_ids)
                 max_accepted_ids = working_accepted_ids.copy()
-        
+
         for _ in range(matching_num):
             working_accepted_ids.pop()
 
@@ -239,6 +264,7 @@ def shotgun(
     max_length: int,
     eos_token_id: int,
     shotgun_cache: ShotgunCache,
+    chaining: bool,
     **model_kwargs,
 ):
     device = input_ids.device
@@ -259,7 +285,8 @@ def shotgun(
         drafts_root, sum_drafts_len = get_chained_draft_tokens(
             prefix_ids=all_tok_ids,
             shotgun_cache=shotgun_cache,
-            max_total_drafts_len=128,
+            max_total_drafts_len=max(0, 128-uncached_prefix_len),
+            chaining=chaining,
         )
 
         # Store the prefix and draft tokens into a single sequence.
@@ -270,7 +297,6 @@ def shotgun(
         )
         combined_ids = torch.from_numpy(combined_ids).unsqueeze(0).to(device)
         model_kwargs["input_ids"] = combined_ids
-
 
         # Create the position ids.
         combined_poss = make_chained_position_ids(
@@ -331,7 +357,8 @@ def shotgun(
 
         # Update shotgun cache.
         cache_update_offset = uncached_prefix_len - 1
-        shotgun_cache.update_cache(all_tok_ids[-shotgun_cache.max_prefix_followup_len-cache_update_offset:])
+        shotgun_cache.update_cache(
+            all_tok_ids[-shotgun_cache.max_prefix_followup_len-cache_update_offset:])
 
         # Check termination conditions.
         if (uncached_prefix_ids == eos_token_id).any() or (next_id == eos_token_id):
@@ -339,5 +366,6 @@ def shotgun(
         if len(all_tok_ids) >= max_length:
             break
 
-    final_ids = torch.tensor(all_tok_ids[:max_length], dtype=torch.long, device=device).unsqueeze(0)
+    final_ids = torch.tensor(
+        all_tok_ids[:max_length], dtype=torch.long, device=device).unsqueeze(0)
     return final_ids, step, accept_length_list

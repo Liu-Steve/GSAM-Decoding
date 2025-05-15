@@ -68,6 +68,10 @@ class ShotgunForwardFunc:
         self.chaining_reserve_len = chaining_reserve_len
 
     def __call__(self, inputs, model, tokenizer, max_new_tokens):
+        # Clear the cache table.
+        # Frozen cache tables are not affected.
+        self.shotgun_cache.clear()
+
         return shotgun_forward(
             inputs, 
             model, 

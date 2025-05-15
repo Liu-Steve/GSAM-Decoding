@@ -70,6 +70,13 @@ class TwoLevelLRUCache:
                 self._cache.popitem(last=False)
             self._cache[prefix] = OrderedDict({followup: None})
 
+    def clear(self) -> None:
+        """
+        Clear the cache.
+        """
+
+        self._cache.clear()
+
     def resize(self, prefix_capacity: int, followup_capacity: int) -> None:
         """
         Resize the cache to new capacity limits.
@@ -165,11 +172,14 @@ class TwoLevelLRUCache:
                 pass
             def noop_put(self, prefix, followup):
                 pass
+            def noop_clear(self):   
+                pass
             
             # Replace methods with no-ops
             cache._touch_prefix = types.MethodType(noop_touch_prefix, cache)
             cache._touch_followup = types.MethodType(noop_touch_followup, cache)
             cache.put = types.MethodType(noop_put, cache)
+            cache.clear = types.MethodType(noop_clear, cache)
         
         return cache
 
@@ -277,3 +287,10 @@ class ShotgunCache:
                 prefix = token_ids[offset:offset+prefix_len]
                 followup = token_ids[offset+prefix_len:offset+total_len]
                 cache.put(tuple(prefix), tuple(followup))
+
+    def clear(self) -> None:
+        """
+        Clear the cache.
+        """
+        for cache in self._caches:
+            cache.clear()

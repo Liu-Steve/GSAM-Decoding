@@ -61,9 +61,11 @@ class ParseCacheConfigAction(argparse.Action):
 
 
 class ShotgunForwardFunc:
-    def __init__(self, shotgun_cache, chaining):
+    def __init__(self, shotgun_cache, max_query_len, chaining, chaining_reserve_len):
         self.shotgun_cache = shotgun_cache
+        self.max_query_len = max_query_len
         self.chaining = chaining
+        self.chaining_reserve_len = chaining_reserve_len
 
     def __call__(self, inputs, model, tokenizer, max_new_tokens):
         return shotgun_forward(
@@ -72,14 +74,22 @@ class ShotgunForwardFunc:
             tokenizer, 
             max_new_tokens, 
             self.shotgun_cache,
-            self.chaining
+            self.max_query_len,
+            self.chaining,
+            self.chaining_reserve_len
         )
 
-    def shotgun_finish_warmup(self):
-        pass
 
-
-def shotgun_forward(inputs, model, tokenizer, max_new_tokens, shotgun_cache, chaining):
+def shotgun_forward(
+        inputs, 
+        model, 
+        tokenizer, 
+        max_new_tokens, 
+        shotgun_cache, 
+        max_query_len, 
+        chaining, 
+        chaining_reserve_len
+    ):
     input_ids = inputs.input_ids
 
     output_ids, step, accept_length_list = shotgun(
@@ -88,7 +98,9 @@ def shotgun_forward(inputs, model, tokenizer, max_new_tokens, shotgun_cache, cha
         max_length=len(input_ids[0])+max_new_tokens,
         eos_token_id=tokenizer.eos_token_id,
         shotgun_cache=shotgun_cache,
-        chaining=chaining
+        max_query_len=max_query_len,
+        chaining=chaining,
+        chaining_reserve_len=chaining_reserve_len,
     )
 
     input_len = len(input_ids[0])
@@ -161,10 +173,22 @@ if __name__ == "__main__":
         help="Override the default dtype. If not set, it will use float16 on GPU.",
     )
     parser.add_argument(
+        "--max-query-len",
+        type=int,
+        default=128,
+        help="The maximum query length.",
+    )
+    parser.add_argument(
         "--chaining",
         type=bool,
         default=True,
         help="Whether to enable chaining.",
+    )
+    parser.add_argument(
+        "--chaining-reserve-len",
+        type=int,
+        default=0,
+        help="The number of tokens to reserve for chaining.",
     )
     
     # Add shotgun cache configuration arguments
@@ -204,7 +228,9 @@ if __name__ == "__main__":
 
     forward_func = ShotgunForwardFunc(
         shotgun_cache,
-        args.chaining
+        args.max_query_len,
+        args.chaining,
+        args.chaining_reserve_len
     )
 
     run_eval(

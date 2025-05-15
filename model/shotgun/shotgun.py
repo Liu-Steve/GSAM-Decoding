@@ -74,9 +74,10 @@ def get_chained_draft_tokens(
         shotgun_cache: ShotgunCache,
         max_total_drafts_len: int,
         chaining: bool,
+        chaining_reserve_len: int,
 ) -> tuple[DraftNode, int]:
     drafts_root = ((), [])
-    remain_drafts_len = max_total_drafts_len
+    remain_drafts_len = max_total_drafts_len - chaining_reserve_len
     
     for step_until_leaf in count():
         remain_drafts_len, full, grown = recursive_get_draft_tokens(
@@ -87,11 +88,19 @@ def get_chained_draft_tokens(
             remain_drafts_len
         )
 
-        if full or not grown:
-            break
-        
         # If chaining is disabled, run only the first iteration.
         if not chaining:
+            break
+
+        # If we reserved some tokens for chaining, add them back since
+        # starting from the second iteration we will grow the tree using
+        # chaining.
+        if chaining_reserve_len > 0:
+            remain_drafts_len += chaining_reserve_len
+            chaining_reserve_len = 0
+            continue
+
+        if full or not grown:
             break
 
     sum_drafts_len = max_total_drafts_len - remain_drafts_len
@@ -264,7 +273,9 @@ def shotgun(
     max_length: int,
     eos_token_id: int,
     shotgun_cache: ShotgunCache,
+    max_query_len: int,
     chaining: bool,
+    chaining_reserve_len: int,
     **model_kwargs,
 ):
     device = input_ids.device
@@ -285,8 +296,9 @@ def shotgun(
         drafts_root, sum_drafts_len = get_chained_draft_tokens(
             prefix_ids=all_tok_ids,
             shotgun_cache=shotgun_cache,
-            max_total_drafts_len=max(0, 128-uncached_prefix_len),
+            max_total_drafts_len=max(0, max_query_len-uncached_prefix_len),
             chaining=chaining,
+            chaining_reserve_len=chaining_reserve_len,
         )
 
         # Store the prefix and draft tokens into a single sequence.

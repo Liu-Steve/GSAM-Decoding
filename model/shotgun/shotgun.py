@@ -266,7 +266,7 @@ def verify_chained_drafts(
     return max_accepted_ids
 
 
-@torch.no_grad()
+@torch.inference_mode()
 def shotgun(
     model: torch.nn.Module,
     input_ids: torch.LongTensor,

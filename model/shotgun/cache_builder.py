@@ -21,15 +21,15 @@ _FAST_PRAGMAS = """
 """
 
 
-def _generate_schema_kgram_counts(prefix_len: int) -> str:
-    """Generate `kgram_counts` schema SQL given prefix length (i.e., the `k` in `k-gram`).
+def _generate_schema_kgram_counts(leader_len: int) -> str:
+    """Generate `kgram_counts` schema SQL given leader length (i.e., the `k` in `k-gram`).
 
     This function creates the SQL schema for the k-gram counting table.
-    The schema includes `prefix_len` columns for token IDs (k1, k2, ...) and a count column.
+    The schema includes `leader_len` columns for token IDs (k1, k2, ...) and a count column.
     Each k-gram forms a primary key in the database.
 
     Example:
-        When prefix_len=3, the generated schema will be:
+        When leader_len=3, the generated schema will be:
         ```
         CREATE TABLE IF NOT EXISTS kgram_counts (
             k1 INTEGER NOT NULL,
@@ -41,36 +41,36 @@ def _generate_schema_kgram_counts(prefix_len: int) -> str:
         ```
 
     Args:
-    - `prefix_len`: Length of the k-gram (number of tokens in sequence)
+    - `leader_len`: Length of the k-gram (number of tokens in sequence)
 
     Returns:
     - SQL statement string for creating the table
     """
 
-    prefix_cols = [f"k{i+1} INTEGER NOT NULL" for i in range(prefix_len)]
-    pk_cols = ", ".join(f"k{i+1}" for i in range(prefix_len))
+    leader_cols = [f"k{i+1} INTEGER NOT NULL" for i in range(leader_len)]
+    pk_cols = ", ".join(f"k{i+1}" for i in range(leader_len))
 
     return f"""
 CREATE TABLE IF NOT EXISTS kgram_counts (
-    {', '.join(prefix_cols)},
+    {', '.join(leader_cols)},
     cnt INTEGER NOT NULL,
     PRIMARY KEY({pk_cols})
 );
 """
 
 
-def _generate_schema_followup_counts(prefix_len: int, followup_len: int) -> str:
-    """Generate `followup_counts` schema SQL given prefix and followup lengths.
+def _generate_schema_follower_counts(leader_len: int, follower_len: int) -> str:
+    """Generate `follower_counts` schema SQL gleader and follower lengths.
 
     This function creates the SQL schema for the follow-up counting table.
-    The schema includes `prefix_len` columns for prefix token IDs (p1, p2, ...),
-    `followup_len` columns for followup token IDs (s1, s2, ...), and a count column.
-    The combination of prefix and followup tokens forms a primary key in the database.
+    The schema includes `leader_len` columns for leader token IDs (p1, p2, ...),
+    `follower_len` columns for follower token IDs (s1, s2, ...), and a count column.
+    The combination of leader and follower tokens forms a primary key in the database.
 
     Example:
-        When prefix_len=2 and followup_len=3, the generated schema will be:
+        When leader_len=2 and follower_len=3, the generated schema will be:
         ```
-        CREATE TABLE IF NOT EXISTS followup_counts (
+        CREATE TABLE IF NOT EXISTS follower_counts (
             p1 INTEGER NOT NULL,
             p2 INTEGER NOT NULL,
             s1 INTEGER NOT NULL,
@@ -82,21 +82,21 @@ def _generate_schema_followup_counts(prefix_len: int, followup_len: int) -> str:
         ```
 
     Args:
-    - `prefix_len`: Length of the prefix sequence (number of tokens in prefix)
-    - `followup_len`: Length of the followup sequence (number of tokens in followup)
+    - `leader_len`: Length of the leader sequence (number of tokens in leader)
+    - `follower_len`: Length of the follower sequence (number of tokens in follower)
 
     Returns:
     - SQL statement string for creating the table
     """
 
-    prefix_cols = [f"p{i+1} INTEGER NOT NULL" for i in range(prefix_len)]
-    followup_cols = [f"s{i+1} INTEGER NOT NULL" for i in range(followup_len)]
-    pk_cols = ", ".join([f"p{i+1}" for i in range(prefix_len)] + [f"s{i+1}" for i in range(followup_len)])
+    leader_cols = [f"p{i+1} INTEGER NOT NULL" for i in range(leader_len)]
+    follower_cols = [f"s{i+1} INTEGER NOT NULL" for i in range(follower_len)]
+    pk_cols = ", ".join([f"p{i+1}" for i in range(leader_len)] + [f"s{i+1}" for i in range(follower_len)])
 
     return f"""
-CREATE TABLE IF NOT EXISTS followup_counts (
-    {', '.join(prefix_cols)},
-    {', '.join(followup_cols)},
+CREATE TABLE IF NOT EXISTS follower_counts (
+    {', '.join(leader_cols)},
+    {', '.join(follower_cols)},
     cnt INTEGER NOT NULL,
     PRIMARY KEY({pk_cols})
 );
@@ -168,7 +168,7 @@ def _open_db(db_path: str, schema: str) -> sqlite3.Connection:
 
 def _update_kgram_counts_db(
         it: Iterable[int],
-        prefix_len: int,
+        leader_len: int,
         conn: sqlite3.Connection,
         query_batch_size: int = 100_000,
         sample_rate: int = 1
@@ -176,11 +176,11 @@ def _update_kgram_counts_db(
     """Populate table `kgram_counts` from a stream of ints.
     
     The table counts the number of times each k-gram appears in the stream.
-    `prefix_len` is the `k` in k-gram.
+    `leader_len` is the `k` in k-gram.
 
     Args:
     - `it`: Iterable of ints.
-    - `prefix_len`: Length of the k-gram.
+    - `leader_len`: Length of the k-gram.
     - `conn`: Connection to the database.
     - `query_batch_size`: Number of SQLqueries to execute at a time.
     - `sample_rate`: Sampling rate (1 means no sampling, n > 1 means sample 1/n of the data).
@@ -189,22 +189,22 @@ def _update_kgram_counts_db(
     cur = conn.cursor()
     
     # Generate SQL query string.
-    prefix_cols = [f"k{i+1}" for i in range(prefix_len)]
-    placeholders = ", ".join(["?"] * prefix_len)
-    prefix_col_str = ", ".join(prefix_cols)
-    pk_str = prefix_col_str
-    query_str = (f"INSERT INTO kgram_counts({prefix_col_str}, cnt) VALUES({placeholders},1) "
+    leader_cols = [f"k{i+1}" for i in range(leader_len)]
+    placeholders = ", ".join(["?"] * leader_len)
+    leader_col_str = ", ".join(leader_cols)
+    pk_str = leader_col_str
+    query_str = (f"INSERT INTO kgram_counts({leader_col_str}, cnt) VALUES({placeholders},1) "
                  f"ON CONFLICT({pk_str}) DO UPDATE SET cnt = cnt + 1")
 
     # Use a sliding window to collect k-grams.
-    window = deque(maxlen=prefix_len)
+    window = deque(maxlen=leader_len)
 
     # Collect k-grams in a list and execute a single SQL query when
     # the list reaches the size of `query_batch_size`.
     todo = []
     for x in it:
         window.append(x)
-        if len(window) == prefix_len:
+        if len(window) == leader_len:
             # Only add to todo list with probability 1/sample_rate
             if sample_rate == 1 or random.randint(1, sample_rate) == 1:
                 todo.append(tuple(window))
@@ -219,7 +219,7 @@ def _worker_kgram_counts(
         worker_id: int,
         batch: Iterable[Dict[str, Any]],
         model_path: str,
-        prefix_len: int,
+        leader_len: int,
         db_dir: str,
         dataset: str,
         sample_rate: int = 1
@@ -230,7 +230,7 @@ def _worker_kgram_counts(
     - `worker_id`: ID of the worker.
     - `batch`: Batch of data to update the database with.
     - `model_path`: Path to the model.
-    - `prefix_len`: Length of the k-gram.
+    - `leader_len`: Length of the k-gram.
     - `db_dir`: Directory to load and save the database.
     - `dataset`: Name of the dataset.
     - `sample_rate`: Sampling rate (1 means no sampling, n > 1 means sample 1/n of the data).
@@ -240,7 +240,7 @@ def _worker_kgram_counts(
     """
 
     db_path = os.path.join(db_dir, f"{dataset}_cnt_ngram_worker{worker_id}.sqlite")
-    schema = _generate_schema_kgram_counts(prefix_len)
+    schema = _generate_schema_kgram_counts(leader_len)
 
     # Tokenize the batched examples and update the database.
     with _open_db(db_path, schema) as conn:
@@ -250,7 +250,7 @@ def _worker_kgram_counts(
         )
         for example in batch:
             tokens = tokenizer(example["text"])["input_ids"]
-            _update_kgram_counts_db(tokens, prefix_len, conn, sample_rate=sample_rate)
+            _update_kgram_counts_db(tokens, leader_len, conn, sample_rate=sample_rate)
 
     return len(batch)
 
@@ -260,7 +260,7 @@ def build_kgram_counts(
         dataset: str,
         db_dir: str,
         num_workers: int,
-        prefix_len: int,
+        leader_len: int,
         worker_batch_size: int,
         sample_rate: int = 1
     ) -> None:
@@ -274,7 +274,7 @@ def build_kgram_counts(
     - `dataset`: Name of the dataset.
     - `db_dir`: Directory to load and save the database.
     - `num_workers`: Number of workers.
-    - `prefix_len`: Length of the k-gram.
+    - `leader_len`: Length of the k-gram.
     - `worker_batch_size`: Number of examples per worker batch.
     - `sample_rate`: Sampling rate (1 means no sampling, n > 1 means sample 1/n of the data).
     """
@@ -283,7 +283,10 @@ def build_kgram_counts(
     os.makedirs(db_dir, exist_ok=True)
 
     # Load the dataset in streaming mode
-    data_stream = load_dataset(dataset, split="train", streaming=True, trust_remote_code=True)
+    if dataset == "alpaca":
+        data_stream = load_dataset("tatsu-lab/alpaca", split="train", streaming=True, trust_remote_code=True)
+    else:
+        data_stream = load_dataset(dataset, split="train", streaming=True, trust_remote_code=True)
     num_examples = data_stream.info.splits["train"].num_examples
 
     # Create a batch iterator.
@@ -303,7 +306,7 @@ def build_kgram_counts(
 
                 # Run the workers in parallel.
                 results = [
-                    pool.apply_async(_worker_kgram_counts, args=(wid, batch, model_path, prefix_len, db_dir, dataset, sample_rate))
+                    pool.apply_async(_worker_kgram_counts, args=(wid, batch, model_path, leader_len, db_dir, dataset, sample_rate))
                     for wid, batch in data_for_workers
                 ]
 
@@ -320,33 +323,33 @@ def build_kgram_counts(
 def get_top_kgrams(
         top_n: int,
         db_path: str,
-        prefix_len: int
+        leader_len: int
     ) -> List[Tuple[Tuple[int, ...], int]]:
     """Get the top N k-grams from the database.
     
     Args:
     - `top_n`: Number of top k-grams to return.
     - `db_path`: Path to the database containing k-gram counts.
-    - `prefix_len`: Length of the k-gram (number of tokens in sequence).
+    - `leader_len`: Length of the k-gram (number of tokens in sequence).
 
     Returns:
     - A list of (k-gram, count) pairs sorted by count in descending order.
     """
 
-    schema = _generate_schema_kgram_counts(prefix_len)
+    schema = _generate_schema_kgram_counts(leader_len)
     with _open_db(db_path, schema) as conn:
         cur = conn.cursor()
         
         # Generate SQL query string
-        prefix_cols = [f"k{i+1}" for i in range(prefix_len)]
-        prefix_col_str = ", ".join(prefix_cols)
-        query_str = f"SELECT {prefix_col_str}, cnt FROM kgram_counts ORDER BY cnt DESC LIMIT ?"
+        leader_cols = [f"k{i+1}" for i in range(leader_len)]
+        leader_col_str = ", ".join(leader_cols)
+        query_str = f"SELECT {leader_col_str}, cnt FROM kgram_counts ORDER BY cnt DESC LIMIT ?"
 
         cur.execute(query_str, (top_n,))
 
         # A list of (k-gram, count) pairs.
         rows = [
-            (tuple(row[i] for i in range(prefix_len)), row[prefix_len])
+            (tuple(row[i] for i in range(leader_len)), row[leader_len])
             for row in cur.fetchall()
         ]
 
@@ -474,7 +477,7 @@ def _parallel_hierarchical_merge(
     - `schema`: SQL schema for creating the database.
     - `table`: Name of the table to merge.
     - `pk_cols`: Comma-separated primary key column list.
-    - `db_type`: Type of database ("ngram" or "followup").
+    - `db_type`: Type of database ("ngram" or "follower").
     
     Returns:
     - Path to the final merged database.
@@ -604,30 +607,30 @@ def _merge_tables(merged_db_path: str,
             cur.execute("DROP TABLE merged")
             cur.execute("DETACH DATABASE worker")
 
-def merge_followup_counts(
+def merge_follower_counts(
         db_dir: str,
         dataset: str,
         num_workers: int,
         num_prev_workers: int,
-        prefix_len: int,
-        followup_len: int
+        leader_len: int,
+        follower_len: int
     ) -> None:
-    """Merge the worker followup counts databases into a single database using parallel hierarchical merging.
+    """Merge the worker follower counts databases into a single database using parallel hierarchical merging.
     
     Args:
     - `db_dir`: Directory containing the databases.
     - `dataset`: Name of the dataset.
     - `num_workers`: Number of workers to run the merge.
     - `num_prev_workers`: Number of worker databases to merge.
-    - `prefix_len`: Length of the prefix sequence.
-    - `followup_len`: Length of the followup sequence.
+    - `leader_len`: Length of the leader sequence.
+    - `follower_len`: Length of the follower sequence.
     """
     # Generate pk_cols string for the merge operation
-    prefix_cols = [f"p{i+1}" for i in range(prefix_len)]
-    followup_cols = [f"s{i+1}" for i in range(followup_len)]
-    pk_cols = ", ".join(prefix_cols + followup_cols)
+    leader_cols = [f"p{i+1}" for i in range(leader_len)]
+    follower_cols = [f"s{i+1}" for i in range(follower_len)]
+    pk_cols = ", ".join(leader_cols + follower_cols)
 
-    schema = _generate_schema_followup_counts(prefix_len, followup_len)
+    schema = _generate_schema_follower_counts(leader_len, follower_len)
     
     # Use the parallel hierarchical merge
     _parallel_hierarchical_merge(
@@ -636,9 +639,9 @@ def merge_followup_counts(
         num_workers, 
         num_prev_workers, 
         schema, 
-        "followup_counts", 
+        "follower_counts", 
         pk_cols, 
-        "followup"
+        "follower"
     )
 
 
@@ -647,7 +650,7 @@ def merge_kgram_counts(
         dataset: str,
         num_workers: int,
         num_prev_workers: int,
-        prefix_len: int
+        leader_len: int
     ) -> None:
     """Merge the worker k-gram counts databases into a single database using parallel hierarchical merging.
     
@@ -656,12 +659,12 @@ def merge_kgram_counts(
     - `dataset`: Name of the dataset.
     - `num_workers`: Number of workers to run the merge.
     - `num_prev_workers`: Number of worker databases to merge.
-    - `prefix_len`: Length of the k-gram.
+    - `leader_len`: Length of the k-gram.
     """
     # Generate pk_cols string for the merge operation
-    pk_cols = ", ".join(f"k{i+1}" for i in range(prefix_len))
+    pk_cols = ", ".join(f"k{i+1}" for i in range(leader_len))
 
-    schema = _generate_schema_kgram_counts(prefix_len)
+    schema = _generate_schema_kgram_counts(leader_len)
 
     # Use the parallel hierarchical merge
     _parallel_hierarchical_merge(
@@ -676,26 +679,26 @@ def merge_kgram_counts(
     )
 
 
-def _update_followup_counts_db(
+def _update_follower_counts_db(
         it: Iterable[int],
-        prefix_len: int,
-        followup_len: int,
-        top_prefixes: set[Tuple[int, ...]],
+        leader_len: int,
+        follower_len: int,
+        top_leaders: set[Tuple[int, ...]],
         conn: sqlite3.Connection,
         query_batch_size: int = 100_000,
         sample_rate: int = 1
     ) -> None:
-    """Update the followup counts database with a stream of ints.
+    """Update the follower counts database with a stream of ints.
 
     The table counts the number of times each v-gram in the stream appears immediately
-    after a top k-gram. `prefix_len` is the `k` in k-gram. `followup_len` is the `v`
+    after a top k-gram. `leader_len` is the `k` in k-gram. `follower_len` is the `v`
     in v-gram.
 
     Args:
     - `it`: Iterable of ints.
-    - `prefix_len`: Length of the prefix.
-    - `followup_len`: Length of the followup.
-    - `top_prefixes`: Set of top prefixes to update the database with.
+    - `leader_len`: Length of the leader.
+    - `follower_len`: Length of the follower.
+    - `top_leaders`: Set of top leaders to update the database with.
     - `conn`: Connection to the database.
     - `query_batch_size`: Number of SQL queries to execute at a time.
     - `sample_rate`: Sampling rate (1 means no sampling, n > 1 means sample 1/n of the data).
@@ -704,29 +707,29 @@ def _update_followup_counts_db(
     cur = conn.cursor()
 
     # Generate SQL query string.
-    prefix_cols = [f"p{i+1}" for i in range(prefix_len)]
-    followup_cols = [f"s{i+1}" for i in range(followup_len)]
-    placeholders = ", ".join(["?"] * (prefix_len + followup_len))
-    col_str = ", ".join(prefix_cols + followup_cols)
+    leader_cols = [f"p{i+1}" for i in range(leader_len)]
+    follower_cols = [f"s{i+1}" for i in range(follower_len)]
+    placeholders = ", ".join(["?"] * (leader_len + follower_len))
+    col_str = ", ".join(leader_cols + follower_cols)
     pk_str = col_str
-    q = (f"INSERT INTO followup_counts({col_str}, cnt) VALUES({placeholders},1) "
+    q = (f"INSERT INTO follower_counts({col_str}, cnt) VALUES({placeholders},1) "
          f"ON CONFLICT({pk_str}) DO UPDATE SET cnt = cnt + 1")
 
-    # Use a sliding window to collect prefix and followup tokens.
-    window = deque(maxlen=prefix_len+followup_len)
+    # Use a sliding window to collect leader and follower tokens.
+    window = deque(maxlen=leader_len+follower_len)
 
-    # Collect prefix and followup tokens in a list and execute a single SQL query when
+    # Collect leader and follower tokens in a list and execute a single SQL query when
     # the list reaches the size of `query_batch_size`.
     todo = []
     for x in it:
         window.append(x)
-        if len(window) == prefix_len + followup_len:
-            prefix = tuple(itertools.islice(window, 0, prefix_len))
-            if prefix in top_prefixes:
+        if len(window) == leader_len + follower_len:
+            leader = tuple(itertools.islice(window, 0, leader_len))
+            if leader in top_leaders:
                 # Only add to todo list with probability 1/sample_rate
                 if sample_rate == 1 or random.randint(1, sample_rate) == 1:
-                    suffix = tuple(itertools.islice(window, prefix_len, prefix_len + followup_len))
-                    todo.append((*prefix, *suffix))
+                    suffix = tuple(itertools.islice(window, leader_len, leader_len + follower_len))
+                    todo.append((*leader, *suffix))
                 if len(todo) >= query_batch_size:
                     cur.executemany(q, todo)
                     todo.clear()
@@ -734,27 +737,27 @@ def _update_followup_counts_db(
         cur.executemany(q, todo)
 
 
-def get_top_followups(
+def get_top_followers(
         top_n: int,
-        prefix_len: int,
-        followup_len: int,
-        top_prefixes: List[Tuple[int, ...]],
+        leader_len: int,
+        follower_len: int,
+        top_leaders: List[Tuple[int, ...]],
         db_path: str
     ) -> Dict[Tuple[int, ...], List[Tuple[Tuple[int, ...], int]]]:
     """
-    Get the top M followups for each prefix from a pre-built database.
+    Get the top M followers for each leader from a pre-built database.
 
     Args:
-    - `top_n`: Number of top followups to return per prefix.
-    - `prefix_len`: Length of prefix.
-    - `followup_len`: Length of followup.
-    - `top_prefixes`: List of prefixes to get followups for.
-    - `db_path`: Path to the database containing followup counts.
+    - `top_n`: Number of top followers to return per leader.
+    - `leader_len`: Length of leader.
+    - `follower_len`: Length of follower.
+    - `top_leaders`: List of leaders to get followers for.
+    - `db_path`: Path to the database containing follower counts.
 
     Returns:
-    - Dictionary mapping prefixes to lists of (followup, count) pairs.
+    - Dictionary mapping leaders to lists of (follower, count) pairs.
     """
-    schema = _generate_schema_followup_counts(prefix_len, followup_len)
+    schema = _generate_schema_follower_counts(leader_len, follower_len)
     with _open_db(db_path, schema) as conn:
         # Configure SQLite to use temp files instead of memory for temp storage
         conn.execute("PRAGMA temp_store = FILE;")
@@ -762,12 +765,12 @@ def get_top_followups(
         # Limit memory usage to 32GB (negative means KB)
         conn.execute("PRAGMA cache_size = -33554432;")  # 32GB
         
-        # Create an index on prefix columns if it doesn't exist already
-        prefix_cols = [f"p{i+1}" for i in range(prefix_len)]
-        index_name = f"idx_prefix_{prefix_len}"
-        prefix_cols_str = ", ".join(prefix_cols)
+        # Create an index on leader columns if it doesn't exist already
+        leader_cols = [f"p{i+1}" for i in range(leader_len)]
+        index_name = f"idx_leader_{leader_len}"
+        leader_cols_str = ", ".join(leader_cols)
         
-        conn.execute(f"CREATE INDEX IF NOT EXISTS {index_name} ON followup_counts ({prefix_cols_str});")
+        conn.execute(f"CREATE INDEX IF NOT EXISTS {index_name} ON follower_counts ({leader_cols_str});")
         # Analyze to make sure the index is used effectively
         conn.execute("ANALYZE;")
         
@@ -778,47 +781,47 @@ def get_top_followups(
         cur = conn.cursor()
         out: Dict[Tuple[int, ...], List[Tuple[Tuple[int, ...], int]]] = {}
         
-        followup_cols = [f"s{i+1}" for i in range(followup_len)]
-        prefix_where = " AND ".join(f"{col} = ?" for col in prefix_cols)
-        followup_col_str = ", ".join(followup_cols)
+        follower_cols = [f"s{i+1}" for i in range(follower_len)]
+        leader_where = " AND ".join(f"{col} = ?" for col in leader_cols)
+        follower_col_str = ", ".join(follower_cols)
         
-        for p in tqdm(top_prefixes, desc="Getting top followups"):
+        for p in tqdm(top_leaders, desc="Getting top followers"):
             cur.execute(
-                f"SELECT {followup_col_str}, cnt FROM followup_counts "
-                f"WHERE {prefix_where} ORDER BY cnt DESC LIMIT ?", 
+                f"SELECT {follower_col_str}, cnt FROM follower_counts "
+                f"WHERE {leader_where} ORDER BY cnt DESC LIMIT ?", 
                 (*p, top_n))
             
-            followup_results = []
+            follower_results = []
             for row in cur.fetchall():
-                followup = tuple(row[i] for i in range(followup_len))
-                count = row[followup_len]
-                followup_results.append((followup, count))
+                follower = tuple(row[i] for i in range(follower_len))
+                count = row[follower_len]
+                follower_results.append((follower, count))
                 
-            out[p] = followup_results
+            out[p] = follower_results
 
     return out
 
 
-def _worker_followup_counts(
+def _worker_follower_counts(
         worker_id: int,
         batch: Iterable[Dict[str, Any]],
         model_path: str,
-        prefix_len: int,
-        followup_len: int,
-        top_prefixes_path: str,
+        leader_len: int,
+        follower_len: int,
+        top_leaders_path: str,
         db_dir: str,
         dataset: str,
         sample_rate: int = 1
     ) -> int:
-    """Update the followup counts database with a batch of data.
+    """Update the follower counts database with a batch of data.
 
     Args:
     - `worker_id`: ID of the worker.
     - `batch`: Batch of data to update the database with.
     - `model_path`: Path to the model.
-    - `prefix_len`: Length of the prefix.
-    - `followup_len`: Length of the followup.
-    - `top_prefixes_path`: Path to the pickled top_prefixes set.
+    - `leader_len`: Length of the leader.
+    - `follower_len`: Length of the follower.
+    - `top_leaders_path`: Path to the pickled top_leaders set.
     - `db_dir`: Directory to load and save the database.
     - `dataset`: Name of the dataset.
     - `sample_rate`: Sampling rate (1 means no sampling, n > 1 means sample 1/n of the data).
@@ -826,58 +829,61 @@ def _worker_followup_counts(
     Returns:
     - Number of examples processed.
     """
-    # Load top_prefixes from file
-    with open(top_prefixes_path, 'rb') as f:
-        top_prefixes = pickle.load(f)
+    # Load top_leaders from file
+    with open(top_leaders_path, 'rb') as f:
+        top_leaders = pickle.load(f)
         
-    db_path = os.path.join(db_dir, f"{dataset}_cnt_followup_worker{worker_id}.sqlite")
-    schema = _generate_schema_followup_counts(prefix_len, followup_len)
+    db_path = os.path.join(db_dir, f"{dataset}_cnt_follower_worker{worker_id}.sqlite")
+    schema = _generate_schema_follower_counts(leader_len, follower_len)
     with _open_db(db_path, schema) as conn:
         tokenizer = AutoTokenizer.from_pretrained(model_path, use_fast=True, use_cache=False, model_max_length=2**20, legacy=True)
         for example in batch:
             tokens = tokenizer(example["text"])["input_ids"]
-            _update_followup_counts_db(tokens, prefix_len, followup_len, top_prefixes, conn, sample_rate=sample_rate)
+            _update_follower_counts_db(tokens, leader_len, follower_len, top_leaders, conn, sample_rate=sample_rate)
         return len(batch)
 
 
-def build_followup_counts(
+def build_follower_counts(
         model_path: str,
         dataset: str,
         db_dir: str,
         num_workers: int,
-        prefix_len: int,
-        followup_len: int,
-        top_prefixes: set[Tuple[int, ...]],
+        leader_len: int,
+        follower_len: int,
+        top_leaders: set[Tuple[int, ...]],
         thread_batch: int,
         sample_rate: int = 1
     ) -> None:
-    """Build the followup counts database by tokenizing the training set from
+    """Build the follower counts database by tokenizing the training set from
     the dataset and updating the database in parallel. Each worker updates a
     separate database. These worker databases can be merged into a single
-    database using the `merge_followup_counts` function.
+    database using the `merge_follower_counts` function.
 
     Args:
     - `model_path`: Path to the model.
     - `dataset`: Name of the dataset.
     - `db_dir`: Directory to load and save the database.
     - `num_workers`: Number of workers.
-    - `prefix_len`: Length of the prefix.
-    - `followup_len`: Length of the followup.
-    - `top_prefixes`: Set of top prefixes to update the database with.
+    - `leader_len`: Length of the leader.
+    - `follower_len`: Length of the follower.
+    - `top_leaders`: Set of top leaders to update the database with.
     - `thread_batch`: Number of examples per worker batch.
     - `sample_rate`: Sampling rate (1 means no sampling, n > 1 means sample 1/n of the data).
     """
     # Create the database directory if it doesn't exist.
     os.makedirs(db_dir, exist_ok=True)
     
-    # Save top_prefixes to a temporary file for workers to load
+    # Save top_leaders to a temporary file for workers to load
     with tempfile.NamedTemporaryFile(delete=False, suffix='.pkl') as f:
-        top_prefixes_path = f.name
-        pickle.dump(top_prefixes, f)
+        top_leaders_path = f.name
+        pickle.dump(top_leaders, f)
 
     try:
         # Load the dataset in streaming mode.
-        data_stream = load_dataset(dataset, split="train", streaming=True, trust_remote_code=True)
+        if dataset == "alpaca":
+            data_stream = load_dataset("tatsu-lab/alpaca", split="train", streaming=True, trust_remote_code=True)
+        else:
+            data_stream = load_dataset(dataset, split="train", streaming=True, trust_remote_code=True)
         total_examples = data_stream.info.splits["train"].num_examples
         
         # Create a pool of workers to update the database.
@@ -897,7 +903,7 @@ def build_followup_counts(
 
                     # Run the workers in parallel.
                     results = [
-                        pool.apply_async(_worker_followup_counts, args=(wid, batch, model_path, prefix_len, followup_len, top_prefixes_path, db_dir, dataset, sample_rate))
+                        pool.apply_async(_worker_follower_counts, args=(wid, batch, model_path, leader_len, follower_len, top_leaders_path, db_dir, dataset, sample_rate))
                         for wid, batch in data_for_tasks
                     ]
 
@@ -911,66 +917,66 @@ def build_followup_counts(
                         pbar.update(count)
     finally:
         # Clean up the temporary file
-        if os.path.exists(top_prefixes_path):
-            os.unlink(top_prefixes_path)
+        if os.path.exists(top_leaders_path):
+            os.unlink(top_leaders_path)
 
 
 def build_lru_cache(
-        top_prefix_n: int,
-        top_followup_n: int,
-        prefix_db_path: str,
-        followup_db_path: str, 
-        prefix_len: int,
-        followup_len: int,
+        top_leader_n: int,
+        top_follower_n: int,
+        leader_db_path: str,
+        follower_db_path: str, 
+        leader_len: int,
+        follower_len: int,
         output_path: str
     ) -> None:
     """
-    Builds a TwoLevelLRUCache instance from top followups data and saves it as a pickle file.
+    Builds a TwoLevelLRUCache instance from top followers data and saves it as a pickle file.
     
     The cache is initialized with the most frequent n-grams as most recently used entries.
     
     Args:
-    - `top_prefix_n`: Number of top prefixes to use.
-    - `top_followup_n`: Number of top followups to get per prefix.
-    - `prefix_db_path`: Path to the database containing k-gram counts.
-    - `followup_db_path`: Path to the database containing followup counts.
-    - `prefix_len`: Length of the prefix sequence.
-    - `followup_len`: Length of the followup sequence.
+    - `top_leader_n`: Number of top leaders to use.
+    - `top_follower_n`: Number of top followers to get per leader.
+    - `leader_db_path`: Path to the database containing k-gram counts.
+    - `follower_db_path`: Path to the database containing follower counts.
+    - `leader_len`: Length of the leader sequence.
+    - `follower_len`: Length of the follower sequence.
     - `output_path`: Path to save the pickle file.
     """
     from .lru_cache import TwoLevelLRUCache
     
-    # Get top k-grams to use as prefixes
-    top_kgrams = get_top_kgrams(top_prefix_n, prefix_db_path, prefix_len)
-    top_prefixes = [kgram for kgram, _ in top_kgrams]
+    # Get top k-grams to use as leaders
+    top_kgrams = get_top_kgrams(top_leader_n, leader_db_path, leader_len)
+    top_leaders = [kgram for kgram, _ in top_kgrams]
     
-    # Get top followups for each prefix
-    followups_dict = get_top_followups(
-        top_n=top_followup_n,
-        prefix_len=prefix_len,
-        followup_len=followup_len,
-        top_prefixes=top_prefixes,
-        db_path=followup_db_path
+    # Get top followers for each leader
+    followers_dict = get_top_followers(
+        top_n=top_follower_n,
+        leader_len=leader_len,
+        follower_len=follower_len,
+        top_leaders=top_leaders,
+        db_path=follower_db_path
     )
     
     # Create a TwoLevelLRUCache
     cache = TwoLevelLRUCache(
-        prefix_capacity=top_prefix_n,
-        followup_capacity=top_followup_n,
-        prefix_len=prefix_len,
-        followup_len=followup_len,
+        leader_capacity=top_leader_n,
+        follower_capacity=top_follower_n,
+        leader_len=leader_len,
+        follower_len=follower_len,
     )
     
-    # Populate the cache with prefixes and followups
-    # Since top_prefixes is already sorted in descending order of frequency,
+    # Populate the cache with leaders and followers
+    # Since top_leaders is already sorted in descending order of frequency,
     # we need to insert them in reverse order so the most frequent becomes most recently used
-    for prefix in tqdm(reversed(top_prefixes), desc="Populating cache", total=len(top_prefixes)):
-        followup_list = followups_dict.get(prefix, [])
+    for leader in tqdm(reversed(top_leaders), desc="Populating cache", total=len(top_leaders)):
+        follower_list = followers_dict.get(leader, [])
         
-        # Since followup_list is already sorted by frequency in descending order,
+        # Since follower_list is already sorted by frequency in descending order,
         # we need to insert them in reverse order so the most frequent becomes most recently used
-        for followup, _ in reversed(followup_list):
-            cache.put(prefix, followup)
+        for follower, _ in reversed(follower_list):
+            cache.put(leader, follower)
     
     # Dump the cache to a file
     with open(output_path, 'wb') as f:
@@ -993,9 +999,9 @@ def _validate_args(args):
     required_args = {
         "count-kgram": ["dataset", "model_path", "db_dir"],
         "merge-kgram": ["dataset", "db_dir", "num_prev_workers"],
-        "count-followup": ["dataset", "model_path", "db_dir", "followup_len", "top_ngrams"],
-        "merge-followup": ["dataset", "db_dir", "num_prev_workers", "followup_len"],
-        "build-lru-cache": ["followup_len", "top_prefixes_n", "top_followups_n", "output_path", "prefix_db_path", "followup_db_path"]
+        "count-follower": ["dataset", "model_path", "db_dir", "follower_len", "top_ngrams"],
+        "merge-follower": ["dataset", "db_dir", "num_prev_workers", "follower_len"],
+        "build-lru-cache": ["follower_len", "top_leaders_n", "top_followers_n", "output_path", "leader_db_path", "follower_db_path"]
     }
     
     # Check that all required args for the given stage are not None
@@ -1011,7 +1017,7 @@ if __name__ == "__main__":
         "--stage",
         type=str,
         required=True,
-        choices=["count-kgram", "merge-kgram", "count-followup", "merge-followup", "build-lru-cache"],
+        choices=["count-kgram", "merge-kgram", "count-follower", "merge-follower", "build-lru-cache"],
         help="The stage of cache building procedure.",
     )
     parser.add_argument(
@@ -1040,27 +1046,27 @@ if __name__ == "__main__":
         default=4,
     )
     parser.add_argument(
-        "--prefix-len",
+        "--leader-len",
         type=int,
         required=True,
     )
     parser.add_argument(
-        "--followup-len",
+        "--follower-len",
         type=int,
         default=None,
-        help="Length of the value n-gram for follow-up counting. Required for count-followup stage."
+        help="Length of the value n-gram for follow-up counting. Required for count-follower stage."
     )
     parser.add_argument(
         "--top-ngrams",
         type=int,
         default=None,
-        help="Number of top n-grams to use as prefixes for follow-up counting."
+        help="Number of top n-grams to use as leaders for follow-up counting."
     )
     parser.add_argument(
         "--num-prev-workers",
         type=int,
         default=None,
-        help="Number of previous worker databases to merge. Required for merge-followup stage."
+        help="Number of previous worker databases to merge. Required for merge-follower stage."
     )
     parser.add_argument(
         "--sample-rate",
@@ -1075,28 +1081,28 @@ if __name__ == "__main__":
         help="Path to save the resulting cache pickle file. Required for build-lru-cache stage."
     )
     parser.add_argument(
-        "--top-prefixes-n",
+        "--top-leaders-n",
         type=int,
         default=None,
-        help="Number of top n-grams to use as prefixes."
+        help="Number of top n-grams to use as leaders."
     )
     parser.add_argument(
-        "--top-followups-n",
+        "--top-followers-n",
         type=int,
         default=None,
-        help="Number of top followups to retrieve for each prefix."
+        help="Number of top followers to retrieve for each leader."
     )
     parser.add_argument(
-        "--prefix-db-path",
+        "--leader-db-path",
         type=str,
         default=None,
         help="Path to the database containing n-gram counts. Required for build-lru-cache stage."
     )
     parser.add_argument(
-        "--followup-db-path",
+        "--follower-db-path",
         type=str,
         default=None,
-        help="Path to the database containing followup counts. Required for build-lru-cache stage."
+        help="Path to the database containing follower counts. Required for build-lru-cache stage."
     )
     args = parser.parse_args()
 
@@ -1109,7 +1115,7 @@ if __name__ == "__main__":
             args.dataset,
             args.db_dir,
             args.num_workers,
-            args.prefix_len,
+            args.leader_len,
             args.thread_batch,
             args.sample_rate)
     elif args.stage == "merge-kgram":
@@ -1118,38 +1124,38 @@ if __name__ == "__main__":
             args.dataset, 
             args.num_workers, 
             args.num_prev_workers,
-            args.prefix_len)
-    elif args.stage == "count-followup":
-        # Load top n-grams to use as prefixes
+            args.leader_len)
+    elif args.stage == "count-follower":
+        # Load top n-grams to use as leaders
         merged_db_path = os.path.join(args.db_dir, f"{args.dataset}_cnt_ngram_merged.sqlite")
-        top_ngrams = get_top_kgrams(args.top_ngrams, merged_db_path, args.prefix_len)
-        top_prefixes = set(kgram for kgram, _ in top_ngrams)
+        top_ngrams = get_top_kgrams(args.top_ngrams, merged_db_path, args.leader_len)
+        top_leaders = set(kgram for kgram, _ in top_ngrams)
 
-        build_followup_counts(
+        build_follower_counts(
             args.model_path,
             args.dataset,
             args.db_dir,
             args.num_workers,
-            args.prefix_len,
-            args.followup_len,
-            top_prefixes,
+            args.leader_len,
+            args.follower_len,
+            top_leaders,
             args.thread_batch,
             args.sample_rate)
-    elif args.stage == "merge-followup":
-        merge_followup_counts(
+    elif args.stage == "merge-follower":
+        merge_follower_counts(
             args.db_dir, 
             args.dataset, 
             args.num_workers, 
             args.num_prev_workers,
-            args.prefix_len,
-            args.followup_len)
+            args.leader_len,
+            args.follower_len)
     elif args.stage == "build-lru-cache":
         build_lru_cache(
-            top_prefix_n=args.top_prefixes_n,
-            top_followup_n=args.top_followups_n,
-            prefix_db_path=args.prefix_db_path,
-            followup_db_path=args.followup_db_path,
-            prefix_len=args.prefix_len,
-            followup_len=args.followup_len,
+            top_leader_n=args.top_leaders_n,
+            top_follower_n=args.top_followers_n,
+            leader_db_path=args.leader_db_path,
+            follower_db_path=args.follower_db_path,
+            leader_len=args.leader_len,
+            follower_len=args.follower_len,
             output_path=args.output_path
         )

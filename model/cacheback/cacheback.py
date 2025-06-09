@@ -4,7 +4,7 @@ from itertools import count
 
 from transformers.generation.utils import _crop_past_key_values
 
-from model.shotgun.lru_cache import ShotgunCache, Tokens
+from model.cacheback.lru_cache import CachebackCache, Tokens
 
 type DraftNode = tuple[Tokens, list[DraftNode]]
 
@@ -13,7 +13,7 @@ def recursive_get_draft_tokens(
         prefix_ids: list[int],
         draft_node: DraftNode,
         step_until_leaf: int,
-        shotgun_cache: ShotgunCache,
+        cacheback_cache: CachebackCache,
         max_total_drafts_len: int,
 ) -> tuple[int, bool, bool]:
     draft, children = draft_node
@@ -32,7 +32,7 @@ def recursive_get_draft_tokens(
 
     # If the current node is a leaf node, get the draft tokens for the children.
     if step_until_leaf == 0:
-        child_drafts, child_drafts_lens = shotgun_cache.get_draft_tokens(
+        child_drafts, child_drafts_lens = cacheback_cache.get_draft_tokens(
             prefix_ids)
 
         # As long as the remaining number of draft tokens allows, add the child
@@ -53,7 +53,7 @@ def recursive_get_draft_tokens(
                 prefix_ids,
                 child,
                 step_until_leaf - 1,
-                shotgun_cache,
+                cacheback_cache,
                 remain_drafts_len
             )
 
@@ -71,7 +71,7 @@ def recursive_get_draft_tokens(
 
 def get_chained_draft_tokens(
         prefix_ids: list[int],
-        shotgun_cache: ShotgunCache,
+        cacheback_cache: CachebackCache,
         max_total_drafts_len: int,
         chaining: bool,
         chaining_reserve_len: int,
@@ -84,7 +84,7 @@ def get_chained_draft_tokens(
             prefix_ids,
             drafts_root,
             step_until_leaf,
-            shotgun_cache,
+            cacheback_cache,
             remain_drafts_len
         )
 
@@ -267,12 +267,12 @@ def verify_chained_drafts(
 
 
 @torch.inference_mode()
-def shotgun(
+def cacheback(
     model: torch.nn.Module,
     input_ids: torch.LongTensor,
     max_length: int,
     eos_token_id: int,
-    shotgun_cache: ShotgunCache,
+    cacheback_cache: CachebackCache,
     max_query_len: int,
     chaining: bool,
     chaining_reserve_len: int,
@@ -289,13 +289,13 @@ def shotgun(
 
     all_tok_ids = uncached_prefix_ids.tolist()
     prefix_len = len(all_tok_ids)
-    shotgun_cache.update_cache(all_tok_ids)
+    cacheback_cache.update_cache(all_tok_ids)
 
     for step in count():
         # Query the cache table to get the draft tokens.
         drafts_root, sum_drafts_len = get_chained_draft_tokens(
             prefix_ids=all_tok_ids,
-            shotgun_cache=shotgun_cache,
+            cacheback_cache=cacheback_cache,
             max_total_drafts_len=max(0, max_query_len-uncached_prefix_len),
             chaining=chaining,
             chaining_reserve_len=chaining_reserve_len,
@@ -367,10 +367,10 @@ def shotgun(
         # Prepare for the next iteration.
         uncached_prefix_ids = np.array(accepted_ids)
 
-        # Update shotgun cache.
+        # Update cacheback cache.
         cache_update_offset = uncached_prefix_len - 1
-        shotgun_cache.update_cache(
-            all_tok_ids[-shotgun_cache.max_leader_follower_len-cache_update_offset:])
+        cacheback_cache.update_cache(
+            all_tok_ids[-cacheback_cache.max_leader_follower_len-cache_update_offset:])
 
         # Check termination conditions.
         if (uncached_prefix_ids == eos_token_id).any() or (next_id == eos_token_id):

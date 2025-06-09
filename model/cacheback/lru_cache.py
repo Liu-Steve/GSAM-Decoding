@@ -184,7 +184,7 @@ class TwoLevelLRUCache:
         return cache
 
 
-class ShotgunCacheConfig:
+class CachebackCacheConfig:
     def __init__(
         self,
         leader_capacity: int,
@@ -202,8 +202,8 @@ class ShotgunCacheConfig:
         self._frozen = frozen
 
 
-class ShotgunCache:
-    def __init__(self, configs: list[ShotgunCacheConfig]) -> None:
+class CachebackCache:
+    def __init__(self, configs: list[CachebackCacheConfig]) -> None:
         if not configs:
             raise ValueError("At least one cache config is required")
 

@@ -28,7 +28,7 @@ MODEL_NAME=vicuna-${MODEL_SIZE}b-v1.3
 Vicuna_PATH=$MODEL_PATH/vicuna-${MODEL_SIZE}b-v1.3
 
 # A working directory for building the frozen table
-WORKING_DIR=/home/zhiyao/work/shotgun/Spec-Bench/alpaca
+WORKING_DIR=/home/zhiyao/work/cacheback/Spec-Bench/alpaca
 
 
 ###########################################
@@ -115,7 +115,7 @@ do
     
     echo "Building leader k-gram DB with leader length ${LEADER_LEN}"
     
-    python -m model.shotgun.cache_builder \
+    python -m model.cacheback.cache_builder \
         --stage count-kgram \
         --model-path $Vicuna_PATH \
         --dataset $FULL_DATASET_NAME \
@@ -139,7 +139,7 @@ do
     
     echo "Merging leader k-gram DB with leader length ${LEADER_LEN}"
     
-    python -m model.shotgun.cache_builder \
+    python -m model.cacheback.cache_builder \
         --stage merge-kgram \
         --db-dir $LEADER_DB_DIR \
         --dataset $FULL_DATASET_NAME \
@@ -175,7 +175,7 @@ do
         
         echo "Building follower DB with leader length ${LEADER_LEN} and follower length ${FOLLOWER_LEN}"
         
-        python -m model.shotgun.cache_builder \
+        python -m model.cacheback.cache_builder \
             --stage count-follower \
             --model-path $Vicuna_PATH \
             --dataset $FULL_DATASET_NAME \
@@ -204,7 +204,7 @@ do
         
         echo "Merging follower DB with leader length ${LEADER_LEN} and follower length ${FOLLOWER_LEN}"
         
-        python -m model.shotgun.cache_builder \
+        python -m model.cacheback.cache_builder \
             --stage merge-follower \
             --dataset $FULL_DATASET_NAME \
             --db-dir $FOLLOWER_DB_DIR \
@@ -232,7 +232,7 @@ do
 
         echo "Building lru cache with leader length ${LEADER_LEN} and follower length ${FOLLOWER_LEN}"
         
-        python -m model.shotgun.cache_builder \
+        python -m model.cacheback.cache_builder \
             --stage build-lru-cache \
             --top-leaders-n $LEADER_CAPACITY \
             --top-followers-n $FOLLOWER_CAPACITY \

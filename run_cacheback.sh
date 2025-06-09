@@ -16,9 +16,9 @@ FOLLOWUP_CAPACITY=128
 FROZEN_TABLE_PATH=alpaca/tatsu-lab_alpaca_leader1_follower3_lru_cache.pkl
 
 
-CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES} python -m evaluation.inference_shotgun \
+CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES} python -m evaluation.inference_cacheback \
     --model-path $Vicuna_PATH \
-    --model-id ${MODEL_NAME}-shotgun-${torch_dtype} \
+    --model-id ${MODEL_NAME}-cacheback-${torch_dtype} \
     --bench-name $bench_NAME \
     --dtype $torch_dtype \
     --max-query-len 96 \

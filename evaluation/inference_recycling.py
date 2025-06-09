@@ -17,6 +17,9 @@ import torch
 
 @torch.no_grad()
 def recycling_forward(inputs, model, tokenizer, max_new_tokens, temperature=0.0, do_sample=False, output_id_topk=8, tree_version="2.2.2"):
+    global adj_matrix
+    adj_matrix = torch.zeros_like(adj_matrix)
+
     input_ids = inputs.input_ids.cuda()
     accept_length_list = []
     step = 0

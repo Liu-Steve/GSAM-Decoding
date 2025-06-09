@@ -1015,7 +1015,7 @@ def _validate_args(args):
 
 if __name__ == "__main__":
 
-    parser = argparse.ArgumentParser(description="Build a cache for Shotgun.")
+    parser = argparse.ArgumentParser(description="Build a cache for Cacheback.")
     parser.add_argument(
         "--stage",
         type=str,

@@ -6,8 +6,8 @@ from fastchat.utils import str_to_torch_dtype
 
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from model.shotgun.shotgun import shotgun
-from model.shotgun.lru_cache import ShotgunCache, ShotgunCacheConfig
+from model.cacheback.cacheback import cacheback
+from model.cacheback.lru_cache import CachebackCache, CachebackCacheConfig
 
 class ParseCacheConfigAction(argparse.Action):
     def __call__(self, parser, namespace, values, option_string=None):
@@ -48,7 +48,7 @@ class ParseCacheConfigAction(argparse.Action):
         if len(values) >= 6:
             frozen = parse_bool(values[5], "frozen")
         
-        config = ShotgunCacheConfig(
+        config = CachebackCacheConfig(
             leader_capacity=leader_capacity,
             follower_capacity=follower_capacity,
             leader_len=leader_len,
@@ -60,9 +60,9 @@ class ParseCacheConfigAction(argparse.Action):
         namespace.cache_configs.append(config)
 
 
-class ShotgunForwardFunc:
-    def __init__(self, shotgun_cache, max_query_len, chaining, chaining_reserve_len):
-        self.shotgun_cache = shotgun_cache
+class CachebackForwardFunc:
+    def __init__(self, cacheback_cache, max_query_len, chaining, chaining_reserve_len):
+        self.cacheback_cache = cacheback_cache
         self.max_query_len = max_query_len
         self.chaining = chaining
         self.chaining_reserve_len = chaining_reserve_len
@@ -70,41 +70,41 @@ class ShotgunForwardFunc:
     def __call__(self, inputs, model, tokenizer, max_new_tokens):
         # Clear the cache table.
         # Frozen cache tables are not affected.
-        self.shotgun_cache.clear()
+        self.cacheback_cache.clear()
 
-        return shotgun_forward(
+        return cacheback_forward(
             inputs, 
             model, 
             tokenizer, 
             max_new_tokens, 
-            self.shotgun_cache,
+            self.cacheback_cache,
             self.max_query_len,
             self.chaining,
             self.chaining_reserve_len
         )
     
-    def shotgun_clear_cache(self):
-        self.shotgun_cache.clear()
+    def cacheback_clear_cache(self):
+        self.cacheback_cache.clear()
 
 
-def shotgun_forward(
+def cacheback_forward(
         inputs, 
         model, 
         tokenizer, 
         max_new_tokens, 
-        shotgun_cache, 
+        cacheback_cache, 
         max_query_len, 
         chaining, 
         chaining_reserve_len
     ):
     input_ids = inputs.input_ids
 
-    output_ids, step, accept_length_list = shotgun(
+    output_ids, step, accept_length_list = cacheback(
         model,
         input_ids, 
         max_length=len(input_ids[0])+max_new_tokens,
         eos_token_id=tokenizer.eos_token_id,
-        shotgun_cache=shotgun_cache,
+        cacheback_cache=cacheback_cache,
         max_query_len=max_query_len,
         chaining=chaining,
         chaining_reserve_len=chaining_reserve_len,
@@ -198,7 +198,7 @@ if __name__ == "__main__":
         help="The number of tokens to reserve for chaining.",
     )
     
-    # Add shotgun cache configuration arguments
+    # Add cacheback cache configuration arguments
     parser.add_argument(
         "--cache-config",
         action=ParseCacheConfigAction,
@@ -230,11 +230,11 @@ if __name__ == "__main__":
 
     tokenizer = AutoTokenizer.from_pretrained(args.model_path)
 
-    # Initialize shotgun cache with user provided configurations
-    shotgun_cache = ShotgunCache(args.cache_configs)
+    # Initialize cacheback cache with user provided configurations
+    cacheback_cache = CachebackCache(args.cache_configs)
 
-    forward_func = ShotgunForwardFunc(
-        shotgun_cache,
+    forward_func = CachebackForwardFunc(
+        cacheback_cache,
         args.max_query_len,
         args.chaining,
         args.chaining_reserve_len

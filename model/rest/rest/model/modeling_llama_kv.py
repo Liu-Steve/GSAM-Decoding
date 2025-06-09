@@ -600,6 +600,7 @@ class LlamaAttention(nn.Module):
         key_states = repeat_kv(key_states, self.num_key_value_groups)
         value_states = repeat_kv(value_states, self.num_key_value_groups)
 
+        query_states = query_states.to(key_states.device)
         attn_weights = torch.matmul(
             query_states, key_states.transpose(2, 3)
         ) / math.sqrt(self.head_dim)
@@ -615,7 +616,7 @@ class LlamaAttention(nn.Module):
                 raise ValueError(
                     f"Attention mask should be of size {(bsz, 1, q_len, kv_seq_len)}, but is {attention_mask.size()}"
                 )
-            attn_weights = attn_weights + attention_mask
+            attn_weights = attn_weights + attention_mask.to(attn_weights.device)
 
         # upcast attention to fp32
         attn_weights = nn.functional.softmax(

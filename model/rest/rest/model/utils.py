@@ -87,13 +87,13 @@ def generate_candidates_and_draft_buffer(logits, input_ids, datastore, token_spa
 
     # Greedy decoding: Select the most probable candidate from the original logits.
     if top_p == 0:
-        candidates_logit = torch.argmax(logits[:, -1]).unsqueeze(0)
+        candidates_logit = torch.argmax(logits[:, -1]).unsqueeze(0).to(input_ids.device)
     else:
         assert top_p < 1, "top_p should between 0.0 and 1"
         next_token_logits = logits[:, -1, :]
         next_token_logits = next_token_logits / (temperature if temperature > 0 else 1.)
         filtered_logits = top_p_filtering(next_token_logits, top_p=top_p)
-        candidates_logit = torch.multinomial(F.softmax(filtered_logits, dim=-1), num_samples=1).squeeze(0)
+        candidates_logit = torch.multinomial(F.softmax(filtered_logits, dim=-1), num_samples=1).squeeze(0).to(input_ids.device)
 
     input_ids_extend = torch.cat([input_ids.squeeze(0), candidates_logit], dim=-1)
         
@@ -189,7 +189,7 @@ def tree_decoding(
     )
     
     # Reorder the obtained logits based on the retrieve_indices to ensure consistency with some reference ordering.
-    logits = tree_logits[0, retrieve_indices]
+    logits = tree_logits[0, retrieve_indices.to(tree_logits.device)]
 
     return logits, outputs
 
@@ -252,7 +252,7 @@ def evaluate_posterior(
     if temperature == 0:
         # Find the tokens that match the maximum logits for each position in the sequence
         posterior_mask = (
-            candidates[:, 1:] == torch.argmax(logits[:, :-1], dim=-1)
+            candidates[:, 1:] == torch.argmax(logits[:, :-1], dim=-1).to(candidates.device)
         ).int()
         candidates_accept_length = (torch.cumprod(posterior_mask, dim=1)).sum(dim=1)
         accept_length = candidates_accept_length.max()

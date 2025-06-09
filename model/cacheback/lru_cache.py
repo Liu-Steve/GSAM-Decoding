@@ -10,7 +10,7 @@ class TwoLevelLRUCache:
     """
     Two-level LRU cache.
 
-    - Top level: up to `leader_capacity` distinct leaderes (each a tuple[int, ...]).
+    - Top level: up to `leader_capacity` distinct leaders (each a tuple[int, ...]).
       Most-recently-used (MRU) leader is on the right; least-recently-used (LRU) leader on the left.
     - Second level: for every leader, up to `follower_capacity` followers
       (also tuples[int, ...]), kept in their own per-leader LRU list.
@@ -20,7 +20,7 @@ class TwoLevelLRUCache:
     - get(leader):              return all followers for leader and mark leader MRU
     - get_follower(leader, follower): check specific follower, mark both levels MRU
     - __contains__(leader):     membership test
-    - __len__():             number of leaderes currently held
+    - __len__():             number of leaders currently held
     """
 
     def __init__(
@@ -84,7 +84,7 @@ class TwoLevelLRUCache:
         If new capacities are smaller, least recently used entries will be discarded.
         
         Args:
-        - `leader_capacity`: New capacity for leaderes
+        - `leader_capacity`: New capacity for leaders
         - `follower_capacity`: New capacity for followers per leader
         
         Raises:
@@ -94,7 +94,7 @@ class TwoLevelLRUCache:
         if leader_capacity <= 0 or follower_capacity <= 0:
             raise ValueError("Capacities must be positive integers")
         
-        # Remove least recently used leaderes until we're within the new capacity
+        # Remove least recently used leaders until we're within the new capacity
         if leader_capacity < self._leader_capacity:
             while len(self._cache) > leader_capacity:
                 self._cache.popitem(last=False)
@@ -139,7 +139,7 @@ class TwoLevelLRUCache:
         return leader in self._cache
 
     def __len__(self) -> int:
-        """Number of leaderes currently stored."""
+        """Number of leaders currently stored."""
         return len(self._cache)
         
     @staticmethod

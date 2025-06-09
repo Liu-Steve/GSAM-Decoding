@@ -56,10 +56,10 @@ LEADER_LEN_MAX=3
 FOLLOWER_LEN_MAX=3
 
 # The number of leaders to keep in the built frozen table.
-NUM_TOP_LEADERS=10000000
+LEADER_CAPACITY=10000000
 
 # The number of followers to keep in the built frozen table for each leader.
-NUM_TOP_FOLLOWERS=128
+FOLLOWER_CAPACITY=128
 
 
 ###################################################
@@ -184,7 +184,7 @@ do
             --leader-len $LEADER_LEN \
             --follower-len $FOLLOWER_LEN \
             --thread-batch $NUM_FOLLOWER_CNT_THREAD_BATCH \
-            --top-ngrams $NUM_TOP_LEADERS \
+            --top-ngrams $LEADER_CAPACITY \
             --sample-rate $SAMPLE_RATE
             
         echo "Finished building follower DB with leader length ${LEADER_LEN} and follower length ${FOLLOWER_LEN}"
@@ -234,8 +234,8 @@ do
         
         python -m model.shotgun.cache_builder \
             --stage build-lru-cache \
-            --top-leaders-n $NUM_TOP_LEADERS \
-            --top-followers-n $NUM_TOP_FOLLOWERS \
+            --top-leaders-n $LEADER_CAPACITY \
+            --top-followers-n $FOLLOWER_CAPACITY \
             --leader-db-path $LEADER_DB_DIR/${LEGALIZED_DATASET_NAME}_cnt_ngram_merged.sqlite \
             --follower-db-path $FOLLOWER_DB_DIR/${LEGALIZED_DATASET_NAME}_cnt_follower_merged.sqlite \
             --leader-len $LEADER_LEN \

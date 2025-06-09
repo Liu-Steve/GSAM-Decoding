@@ -239,6 +239,9 @@ def _worker_kgram_counts(
     - Number of examples processed.
     """
 
+    # Substitute the `/` character in the dataset string into `_` to avoid invalid file names.
+    dataset = dataset.replace('/', '_')
+
     db_path = os.path.join(db_dir, f"{dataset}_cnt_ngram_worker{worker_id}.sqlite")
     schema = _generate_schema_kgram_counts(leader_len)
 
@@ -283,10 +286,7 @@ def build_kgram_counts(
     os.makedirs(db_dir, exist_ok=True)
 
     # Load the dataset in streaming mode
-    if dataset == "alpaca":
-        data_stream = load_dataset("tatsu-lab/alpaca", split="train", streaming=True, trust_remote_code=True)
-    else:
-        data_stream = load_dataset(dataset, split="train", streaming=True, trust_remote_code=True)
+    data_stream = load_dataset(dataset, split="train", streaming=True, trust_remote_code=True)
     num_examples = data_stream.info.splits["train"].num_examples
 
     # Create a batch iterator.
@@ -482,6 +482,9 @@ def _parallel_hierarchical_merge(
     Returns:
     - Path to the final merged database.
     """
+    # Substitute the `/` character in the dataset string into `_` to avoid invalid file names.
+    dataset = dataset.replace('/', '_')
+
     # Generate paths to the worker databases and track their index ranges
     current_files = [
         (os.path.join(db_dir, f"{dataset}_cnt_{db_type}_worker{worker_id}.sqlite"), worker_id, worker_id)
@@ -832,7 +835,10 @@ def _worker_follower_counts(
     # Load top_leaders from file
     with open(top_leaders_path, 'rb') as f:
         top_leaders = pickle.load(f)
-        
+    
+    # Substitute the `/` character in the dataset string into `_` to avoid invalid file names.
+    dataset = dataset.replace('/', '_')
+
     db_path = os.path.join(db_dir, f"{dataset}_cnt_follower_worker{worker_id}.sqlite")
     schema = _generate_schema_follower_counts(leader_len, follower_len)
     with _open_db(db_path, schema) as conn:
@@ -880,10 +886,7 @@ def build_follower_counts(
 
     try:
         # Load the dataset in streaming mode.
-        if dataset == "alpaca":
-            data_stream = load_dataset("tatsu-lab/alpaca", split="train", streaming=True, trust_remote_code=True)
-        else:
-            data_stream = load_dataset(dataset, split="train", streaming=True, trust_remote_code=True)
+        data_stream = load_dataset(dataset, split="train", streaming=True, trust_remote_code=True)
         total_examples = data_stream.info.splits["train"].num_examples
         
         # Create a pool of workers to update the database.
@@ -1126,8 +1129,11 @@ if __name__ == "__main__":
             args.num_prev_workers,
             args.leader_len)
     elif args.stage == "count-follower":
+        # Substitute the `/` character in the dataset string into `_` to avoid invalid file names.
+        dataset = args.dataset.replace('/', '_')
+
         # Load top n-grams to use as leaders
-        merged_db_path = os.path.join(args.db_dir, f"{args.dataset}_cnt_ngram_merged.sqlite")
+        merged_db_path = os.path.join(args.db_dir, f"{dataset}_cnt_ngram_merged.sqlite")
         top_ngrams = get_top_kgrams(args.top_ngrams, merged_db_path, args.leader_len)
         top_leaders = set(kgram for kgram, _ in top_ngrams)
 

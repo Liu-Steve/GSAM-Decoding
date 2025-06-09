@@ -370,7 +370,7 @@ def shotgun(
         # Update shotgun cache.
         cache_update_offset = uncached_prefix_len - 1
         shotgun_cache.update_cache(
-            all_tok_ids[-shotgun_cache.max_prefix_followup_len-cache_update_offset:])
+            all_tok_ids[-shotgun_cache.max_leader_follower_len-cache_update_offset:])
 
         # Check termination conditions.
         if (uncached_prefix_ids == eos_token_id).any() or (next_id == eos_token_id):

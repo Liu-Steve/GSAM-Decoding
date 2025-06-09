@@ -30,13 +30,13 @@ class ParseCacheConfigAction(argparse.Action):
         
         # Check if we have at least the required arguments
         if len(values) < 4:
-            raise ValueError("Cache config requires at least 4 arguments: prefix_capacity, followup_capacity, prefix_len, followup_len")
+            raise ValueError("Cache config requires at least 4 arguments: leader_capacity, follower_capacity, leader_len, follower_len")
         
         # Parse the required arguments
-        prefix_capacity = parse_int(values[0], "prefix_capacity")
-        followup_capacity = parse_int(values[1], "followup_capacity")
-        prefix_len = parse_int(values[2], "prefix_len")
-        followup_len = parse_int(values[3], "followup_len")
+        leader_capacity = parse_int(values[0], "leader_capacity")
+        follower_capacity = parse_int(values[1], "follower_capacity")
+        leader_len = parse_int(values[2], "leader_len")
+        follower_len = parse_int(values[3], "follower_len")
         
         # Parse optional arguments
         file_path = None
@@ -49,10 +49,10 @@ class ParseCacheConfigAction(argparse.Action):
             frozen = parse_bool(values[5], "frozen")
         
         config = ShotgunCacheConfig(
-            prefix_capacity=prefix_capacity,
-            followup_capacity=followup_capacity,
-            prefix_len=prefix_len,
-            followup_len=followup_len,
+            leader_capacity=leader_capacity,
+            follower_capacity=follower_capacity,
+            leader_len=leader_len,
+            follower_len=follower_len,
             file_path=file_path,
             frozen=frozen
         )
@@ -82,6 +82,9 @@ class ShotgunForwardFunc:
             self.chaining,
             self.chaining_reserve_len
         )
+    
+    def shotgun_clear_cache(self):
+        self.shotgun_cache.clear()
 
 
 def shotgun_forward(
@@ -203,7 +206,7 @@ if __name__ == "__main__":
         required=True,
         metavar="CONFIG_VALUE",
         help="Specify cache configuration(s). Format: "
-             "prefix_capacity followup_capacity prefix_len followup_len [file_path] [frozen]. "
+             "leader_capacity follower_capacity leader_len follower_len [file_path] [frozen]. "
              "Optional values: file_path(default=None) frozen(default=false).",
     )
 

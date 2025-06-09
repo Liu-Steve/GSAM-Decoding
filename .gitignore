@@ -1,2 +1,5 @@
 __pycache__
-learn.ipynb
+openwebtext*
+data/
+DraftRetriever/
+plot_data/

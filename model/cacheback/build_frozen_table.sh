@@ -22,13 +22,13 @@ set -e
 ###########################################
 
 # Spec-Bench paths
-MODEL_PATH=/home/zhiyao/work/Spec-Bench-Models
+MODEL_PATH=/your_own_model_path/
 MODEL_SIZE=7
 MODEL_NAME=vicuna-${MODEL_SIZE}b-v1.3
 Vicuna_PATH=$MODEL_PATH/vicuna-${MODEL_SIZE}b-v1.3
 
 # A working directory for building the frozen table
-WORKING_DIR=/home/zhiyao/work/cacheback/Spec-Bench/alpaca
+WORKING_DIR=/your_own_working_dir/
 
 
 ###########################################

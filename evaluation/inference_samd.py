@@ -138,6 +138,7 @@ if __name__ == "__main__":
         device_map = "cuda"
     else:
         device_map = "auto"
+    device_map = "auto"
 
     model = AutoModelForCausalLM.from_pretrained(
         args.model_path,

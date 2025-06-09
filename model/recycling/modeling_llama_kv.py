@@ -736,6 +736,10 @@ class LlamaSdpaAttention(LlamaAttention):
             key_states = key_states.contiguous()
             value_states = value_states.contiguous()
 
+        if attention_mask is not None:
+            attention_mask = attention_mask.to(key_states.device)
+        query_states = query_states.to(key_states.device)
+        
         attn_output = torch.nn.functional.scaled_dot_product_attention(
             query_states,
             key_states,

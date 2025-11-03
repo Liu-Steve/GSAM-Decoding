@@ -1,4 +1,38 @@
 <div align="center">
+  <h2>Cacheback Decoding Implementation for Spec-Bench</h2> 
+</div>
+
+This branch contains the implementation of Cacheback Decoding for Spec-Bench.
+Cacheback is a training-free and model-agnostic speculative decoding method that exploits the locality in language to
+accelerate Large Language Model (LLM) inference.
+It leverages only Least Recently Used (LRU) cache tables of token n-grams to generate draft sequences.
+Cacheback achieves state-of-the-art performance among comparable methods despite its minimalist design.
+
+Check out our paper [here](https://aclanthology.org/2025.emnlp-main.1581.pdf).
+
+**Code Changes:**
+- Implemented Cacheback decoding algorithm [(commit 21abdab)](https://github.com/zyma98/Spec-Bench/commit/21abdab43db50b010cd8eab2a6d2bac74468c52c)
+- Bug fix: reset TokenRecycling adjacency table after each test case [(commit ab62b10)](https://github.com/zyma98/Spec-Bench/commit/ab62b1030a4fd0ea357f135176077be271ce3e20)
+- Bug fix: move tensors to correct devices when running on multiple GPUs [(commit fd9146e)](https://github.com/zyma98/Spec-Bench/commit/fd9146e24aa3b12e4f16821f699d47f5b17b08e4)
+
+
+## Citation
+
+```
+@inproceedings{ma2025cacheback,
+  title={Cacheback: Speculative Decoding With Nothing But Cache},
+  author={Ma, Zhiyao and Gim, In and Zhong, Lin},
+  booktitle={Proceedings of the 2025 Conference on Empirical Methods in Natural Language Processing},
+  pages={31067--31072},
+  year={2025}
+}
+```
+
+## 
+
+Below is the original README from the upstream Spec-Bench repository.
+
+<div align="center">
   <h2><img src="assets/logo.png" height="28px"/><i>Spec-Bench:</i> A Comprehensive Benchmark and Unified<br>Evaluation Platform for Speculative Decoding</h2> 
 </div>
 <p align="center">

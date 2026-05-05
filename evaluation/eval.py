@@ -7,6 +7,8 @@ python3 gen_model_answer.py --model-path lmsys/fastchat-t5-3b-v1.0 --model-id fa
 
 import json
 import os
+import psutil
+import gc
 import time
 import torch
 import numpy as np
@@ -229,6 +231,14 @@ def get_model_answers(
             choices.append({"index": i, "turns": turns, "decoding_steps": steps, "new_tokens": new_tokens, "wall_time": wall_time,
                             "accept_lengths": cur_accept_lengths_tree})
 
+        # Get memory usage
+        tstamp = time.time()
+        # gc.collect()
+        pid = os.getpid()
+        process = psutil.Process(pid)
+        mem_info = process.memory_info()
+        physical_memory_usage = mem_info.rss
+
         # Dump answers
         os.makedirs(os.path.dirname(answer_file), exist_ok=True)
         with open(os.path.expanduser(answer_file), "a") as fout:
@@ -238,7 +248,8 @@ def get_model_answers(
                 "answer_id": shortuuid.uuid(),
                 "model_id": model_id,
                 "choices": choices,
-                "tstamp": time.time(),
+                "tstamp": tstamp,
+                "memory_usage": physical_memory_usage,
             }
             fout.write(json.dumps(ans_json) + "\n")
     print("#Mean accepted tokens: ", np.mean(accept_lengths_tree))

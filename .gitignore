@@ -1,4 +1,5 @@
 __pycache__/
+*.so
 model_answer*/
 target/
 leader*/
@@ -8,3 +9,5 @@ local_cache/
 build/
 .cache/
 .vscode/
+.clangd
+sam_data

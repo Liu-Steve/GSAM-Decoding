@@ -10,6 +10,7 @@ import os
 import psutil
 import gc
 import time
+import threading
 import torch
 import numpy as np
 import shortuuid
@@ -17,6 +18,38 @@ import shortuuid
 from fastchat.llm_judge.common import load_questions
 from fastchat.model import get_conversation_template
 from tqdm import tqdm
+
+
+class MemorySampler:
+    """Sample the current process CPU RSS while a question is being decoded."""
+
+    def __init__(self, interval_seconds=2.0):
+        self.interval_seconds = interval_seconds
+        self.process = psutil.Process(os.getpid())
+        self.samples = []
+        self._stop_event = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def start(self):
+        self._sample()
+        self._thread.start()
+
+    def stop(self):
+        self._stop_event.set()
+        self._thread.join()
+        self._sample()
+
+    def mean_rss(self):
+        if len(self.samples) == 0:
+            return self.process.memory_info().rss
+        return int(np.mean(self.samples))
+
+    def _sample(self):
+        self.samples.append(self.process.memory_info().rss)
+
+    def _run(self):
+        while not self._stop_event.wait(self.interval_seconds):
+            self._sample()
 
 
 def run_eval(
@@ -159,6 +192,8 @@ def get_model_answers(
 
     accept_lengths_tree = []
     for question in tqdm(questions):
+        memory_sampler = MemorySampler(interval_seconds=2.0)
+        memory_sampler.start()
 
         choices = []
         for i in range(num_choices):
@@ -231,13 +266,10 @@ def get_model_answers(
             choices.append({"index": i, "turns": turns, "decoding_steps": steps, "new_tokens": new_tokens, "wall_time": wall_time,
                             "accept_lengths": cur_accept_lengths_tree})
 
-        # Get memory usage
+        memory_sampler.stop()
+
         tstamp = time.time()
-        # gc.collect()
-        pid = os.getpid()
-        process = psutil.Process(pid)
-        mem_info = process.memory_info()
-        physical_memory_usage = mem_info.rss
+        physical_memory_usage = memory_sampler.mean_rss()
 
         # Dump answers
         os.makedirs(os.path.dirname(answer_file), exist_ok=True)
@@ -267,4 +299,3 @@ def reorg_answer_file(answer_file):
     with open(answer_file, "w") as fout:
         for qid in qids:
             fout.write(answers[qid])
-

@@ -1,5 +1,7 @@
 # GSAM Ablation Experiment
 
+Before run experiment, run `python model/gsamd/setup.py build_ext --inplace` to build library of gsam.
+
 ## Single Successor State Count
 
 | SAM Type | Single   | All      | Rate     |

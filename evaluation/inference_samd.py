@@ -4,19 +4,40 @@ Usage:
 python3 gen_model_answer.py --model-path lmsys/fastchat-t5-3b-v1.0 --model-id fastchat-t5-3b-v1.0
 """
 import argparse
+
 import torch
 from fastchat.utils import str_to_torch_dtype
-from evaluation.eval import run_eval, reorg_answer_file
 from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedTokenizer
-from model.samd import SamdConfig, SamdModel, SamdGenerationConfig, DraftModel, load_sam
+
+from evaluation.eval import reorg_answer_file, run_eval
+from model.samd import DraftModel, SamdConfig, SamdGenerationConfig, SamdModel, load_sam
+
+
+def resolve_device(device_name: str) -> torch.device:
+    if device_name == "auto":
+        if torch.cuda.is_available():
+            return torch.device("cuda")
+        if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            return torch.device("mps")
+        return torch.device("cpu")
+    return torch.device(device_name)
+
+
+def resolve_dtype(dtype_name: str | None, device: torch.device) -> str:
+    if dtype_name is not None:
+        return dtype_name
+    if device.type == "cuda":
+        return "float16"
+    return "float32"
+
 
 def samd_forward(
-    inputs, 
-    model: SamdModel, 
-    tokenizer: PreTrainedTokenizer, 
-    max_new_tokens: int, 
+    inputs,
+    model: SamdModel,
+    tokenizer: PreTrainedTokenizer,
+    max_new_tokens: int,
     temperature: float = 0.0,
-    do_sample: bool = False
+    do_sample: bool = False,
 ):
     max_cache_len = model.lm.config.max_position_embeddings
     input_ids = inputs.input_ids
@@ -26,7 +47,7 @@ def samd_forward(
             max_new_tokens=max_new_tokens,
             max_cache_len=max_cache_len,
             greedy=not do_sample,
-            temperature=temperature
+            temperature=temperature,
         ),
     )
     output_ids = outputs.output_ids
@@ -91,34 +112,40 @@ if __name__ == "__main__":
     parser.add_argument(
         "--dtype",
         type=str,
-        default="float16",
+        default=None,
         choices=["float32", "float64", "float16", "bfloat16"],
-        help="Override the default dtype. If not set, it will use float16 on GPU.",
+        help="Override the dtype. Defaults to float16 on CUDA and float32 elsewhere.",
+    )
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="auto",
+        choices=["auto", "cpu", "cuda", "mps"],
     )
     parser.add_argument(
         "--samd_n_predicts",
         type=int,
-        default=40
+        default=40,
     )
     parser.add_argument(
         "--static_sam_path",
         type=str,
-        default=None
+        default=None,
     )
     parser.add_argument(
         "--samd_len_threshold",
         type=int,
-        default=5
+        default=5,
     )
     parser.add_argument(
         "--samd_len_bias",
         type=int,
-        default=5
+        default=5,
     )
     parser.add_argument(
         "--samd_tree_path",
         type=str,
-        default=None
+        default=None,
     )
     parser.add_argument("--tree_method", type=str, default=None, choices=["token_recycle", "eagle2"])
     parser.add_argument("--tree_model_path", type=str, default="path/to/EAGLE-Vicuna-7B-v1.3")
@@ -133,22 +160,34 @@ if __name__ == "__main__":
         answer_file = f"data/{args.bench_name}/model_answer/{args.model_id}.jsonl"
 
     print(f"Output to {answer_file}")
-    
-    if args.num_gpus_total == 1:
-        device_map = "cuda"
-    else:
-        device_map = "auto"
-    device_map = "auto"
 
-    model = AutoModelForCausalLM.from_pretrained(
-        args.model_path,
-        torch_dtype=str_to_torch_dtype(args.dtype),
+    requested_device = resolve_device(args.device)
+    dtype_name = resolve_dtype(args.dtype, requested_device)
+    dtype = str_to_torch_dtype(dtype_name)
+    print(f"Loading model on {requested_device} with dtype {dtype_name}")
+
+    model_kwargs = dict(
+        torch_dtype=dtype,
         low_cpu_mem_usage=True,
-        device_map=device_map,
-        attn_implementation=args.attn_implementation
+        attn_implementation=args.attn_implementation,
     )
+    if requested_device.type == "cuda" and args.num_gpus_total > 1:
+        model = AutoModelForCausalLM.from_pretrained(
+            args.model_path,
+            device_map="auto",
+            **model_kwargs,
+        )
+    else:
+        model = AutoModelForCausalLM.from_pretrained(
+            args.model_path,
+            **model_kwargs,
+        )
+        model.to(requested_device)
 
     tokenizer = AutoTokenizer.from_pretrained(args.model_path)
+
+    if not hasattr(model, "hf_device_map"):
+        model.hf_device_map = {"": str(requested_device)}
 
     device = next(model.lm_head.parameters()).device
     sam = load_sam(args.static_sam_path) if args.static_sam_path is not None else None
@@ -163,24 +202,21 @@ if __name__ == "__main__":
         tree_path=args.samd_tree_path,
     )
     draft = DraftModel(
-        samd_config, 
+        samd_config,
         sam_static=sam,
         lm=model,
-        dtype=str_to_torch_dtype(args.dtype),
+        dtype=dtype,
         device=device,
     )
     samd_model = SamdModel(
-        samd_config, 
-        model, 
-        draft, 
+        samd_config,
+        model,
+        draft,
         tokenizer.eos_token_id,
-        str_to_torch_dtype(args.dtype),
+        dtype,
         device,
     )
-    if args.temperature > 0:
-        do_sample = True
-    else:
-        do_sample = False
+    do_sample = args.temperature > 0
 
     run_eval(
         model=samd_model,
@@ -197,6 +233,7 @@ if __name__ == "__main__":
         num_gpus_total=args.num_gpus_total,
         temperature=args.temperature,
         do_sample=do_sample,
+        device=str(device),
     )
 
     reorg_answer_file(answer_file)

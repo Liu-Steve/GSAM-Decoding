@@ -10,6 +10,24 @@ from evaluation.eval import reorg_answer_file, run_eval
 from model.gsamd import DraftModel, SamdConfig, SamdGenerationConfig, SamdModel, load_sam
 
 
+def resolve_device(device_name: str) -> torch.device:
+    if device_name == "auto":
+        if torch.cuda.is_available():
+            return torch.device("cuda")
+        if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            return torch.device("mps")
+        return torch.device("cpu")
+    return torch.device(device_name)
+
+
+def resolve_dtype(dtype_name: str | None, device: torch.device) -> str:
+    if dtype_name is not None:
+        return dtype_name
+    if device.type == "cuda":
+        return "float16"
+    return "float32"
+
+
 def gsamd_forward(
     inputs,
     model: SamdModel,
@@ -52,8 +70,14 @@ def parse_args():
     parser.add_argument(
         "--dtype",
         type=str,
-        default="float16",
+        default=None,
         choices=["float32", "float64", "float16", "bfloat16"],
+    )
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="auto",
+        choices=["auto", "cpu", "cuda", "mps"],
     )
     parser.add_argument("--samd_n_predicts", type=int, default=40)
     parser.add_argument("--static_sam_path", type=str, default=None)
@@ -80,18 +104,33 @@ if __name__ == "__main__":
 
     print(f"Output to {answer_file}")
 
-    device_map = "cuda" if args.num_gpus_total == 1 else "auto"
-    device_map = "auto"
+    requested_device = resolve_device(args.device)
+    dtype_name = resolve_dtype(args.dtype, requested_device)
+    dtype = str_to_torch_dtype(dtype_name)
+    print(f"Loading model on {requested_device} with dtype {dtype_name}")
 
-    model = AutoModelForCausalLM.from_pretrained(
-        args.model_path,
-        torch_dtype=str_to_torch_dtype(args.dtype),
+    model_kwargs = dict(
+        torch_dtype=dtype,
         low_cpu_mem_usage=True,
-        device_map=device_map,
         attn_implementation=args.attn_implementation,
     )
+    if requested_device.type == "cuda" and args.num_gpus_total > 1:
+        model = AutoModelForCausalLM.from_pretrained(
+            args.model_path,
+            device_map="auto",
+            **model_kwargs,
+        )
+    else:
+        model = AutoModelForCausalLM.from_pretrained(
+            args.model_path,
+            **model_kwargs,
+        )
+        model.to(requested_device)
 
     tokenizer = AutoTokenizer.from_pretrained(args.model_path)
+
+    if not hasattr(model, "hf_device_map"):
+        model.hf_device_map = {"": str(requested_device)}
 
     device = next(model.lm_head.parameters()).device
     sam = load_sam(args.static_sam_path) if args.static_sam_path is not None else None
@@ -111,7 +150,7 @@ if __name__ == "__main__":
         samd_config,
         sam_static=sam,
         lm=model,
-        dtype=str_to_torch_dtype(args.dtype),
+        dtype=dtype,
         device=device,
     )
     samd_model = SamdModel(
@@ -119,7 +158,7 @@ if __name__ == "__main__":
         model,
         draft,
         tokenizer.eos_token_id,
-        str_to_torch_dtype(args.dtype),
+        dtype,
         device,
     )
     do_sample = args.temperature > 0
@@ -139,6 +178,7 @@ if __name__ == "__main__":
         num_gpus_total=args.num_gpus_total,
         temperature=args.temperature,
         do_sample=do_sample,
+        device=str(device),
     )
 
     reorg_answer_file(answer_file)

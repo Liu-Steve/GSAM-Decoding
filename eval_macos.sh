@@ -1,0 +1,33 @@
+#Path and Parameters
+MODEL_PATH=/Users/bytedance/Program/llm/
+SPEC_BENCH_PATH=/Users/bytedance/Program/GSAM-Decoding/
+
+cd $SPEC_BENCH_PATH
+
+# Run the evaluation
+MODEL_SIZE=7
+Vicuna_PATH=$MODEL_PATH/vicuna-${MODEL_SIZE}b-v1.3
+MODEL_NAME=vicuna-${MODEL_SIZE}b-v1.3
+SAM_PATH=$SPEC_BENCH_PATH/local_cache/static_sam_origin_dict.pkl
+REST_PATH=$SPEC_BENCH_PATH/local_cache/datastore_chat_large.idx
+CACHEBACK_PATH=$SPEC_BENCH_PATH/local_cache/openwebtext_leader1_follower3_lru_cache.pkl
+GSAM_PATH=$SPEC_BENCH_PATH/local_cache/static_data_gsam_small_dict.pb
+GSAM_NG_PATH=$SPEC_BENCH_PATH/local_cache/static_data_sam_small_dict.pb
+GSAM_NS_PATH=$SPEC_BENCH_PATH/local_cache/static_data_gsam_normal_dict.pb
+GSAM_NGS_PATH=$SPEC_BENCH_PATH/local_cache/static_data_sam_normal_dict.pb
+TEMP=0.0
+
+bench_NAME="spec_bench"
+torch_dtype="float16" # ["float32", "float64", "float16", "bfloat16"]
+
+python -m evaluation.inference_baseline --model-path $Vicuna_PATH --model-id ${MODEL_NAME}-vanilla-${torch_dtype}-temp-${TEMP} --bench-name $bench_NAME --temperature $TEMP --dtype $torch_dtype
+# python -m evaluation.inference_rest --model-path $Vicuna_PATH --model-id ${MODEL_NAME}-rest --bench-name $bench_NAME --temperature $TEMP --dtype $torch_dtype --datastore-path $REST_PATH
+# python -m evaluation.inference_pld --model-path $Vicuna_PATH --model-id ${MODEL_NAME}-pld-${torch_dtype} --bench-name $bench_NAME --dtype $torch_dtype
+# USE_LADE=1 python -m evaluation.inference_lookahead --model-path $Vicuna_PATH --model-id ${MODEL_NAME}-lade-level-5-win-7-guess-7-${torch_dtype} --level 5 --window 7 --guess 7 --bench-name $bench_NAME --dtype $torch_dtype
+# python -m evaluation.inference_recycling --model-path $Vicuna_PATH --model-id ${MODEL_NAME}-recycling --bench-name $bench_NAME --temperature $TEMP --dtype $torch_dtype
+# python -m evaluation.inference_cacheback --model-path $Vicuna_PATH --model-id ${MODEL_NAME}-cacheback --bench-name $bench_NAME --dtype $torch_dtype --max-query-len 96 --chaining-reserve-len 16 --cache-config 1048576 128 1 3 $CACHEBACK_PATH False
+PYTHONPATH=$SPEC_BENCH_PATH python -m evaluation.inference_samd --model-path $Vicuna_PATH --model-id ${MODEL_NAME}-samd-origin --bench-name $bench_NAME --temperature $TEMP --dtype $torch_dtype --samd_n_predicts 40 --samd_len_threshold 5 --samd_len_bias 20 --attn_implementation sdpa --static_sam_path $SAM_PATH
+PYTHONPATH=$SPEC_BENCH_PATH python -m evaluation.inference_gsamd --model-path $Vicuna_PATH --model-id ${MODEL_NAME}-gsamd-small --bench-name $bench_NAME --temperature $TEMP --dtype $torch_dtype --samd_n_predicts 40 --samd_len_threshold 5 --samd_len_bias 20 --attn_implementation sdpa --static_sam_path $GSAM_PATH
+# PYTHONPATH=$SPEC_BENCH_PATH python -m evaluation.inference_gsamd --model-path $Vicuna_PATH --model-id ${MODEL_NAME}-samd-small --bench-name $bench_NAME --temperature $TEMP --dtype $torch_dtype --samd_n_predicts 40 --samd_len_threshold 5 --samd_len_bias 20 --attn_implementation sdpa --static_sam_path $GSAM_NG_PATH
+# PYTHONPATH=$SPEC_BENCH_PATH python -m evaluation.inference_gsamd --model-path $Vicuna_PATH --model-id ${MODEL_NAME}-gsamd-normal --bench-name $bench_NAME --temperature $TEMP --dtype $torch_dtype --samd_n_predicts 40 --samd_len_threshold 5 --samd_len_bias 20 --attn_implementation sdpa --static_sam_path $GSAM_NS_PATH
+# PYTHONPATH=$SPEC_BENCH_PATH python -m evaluation.inference_gsamd --model-path $Vicuna_PATH --model-id ${MODEL_NAME}-samd-normal --bench-name $bench_NAME --temperature $TEMP --dtype $torch_dtype --samd_n_predicts 40 --samd_len_threshold 5 --samd_len_bias 20 --attn_implementation sdpa --static_sam_path $GSAM_NGS_PATH

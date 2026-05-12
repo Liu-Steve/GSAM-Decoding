@@ -52,6 +52,49 @@ class MemorySampler:
             self._sample()
 
 
+def synchronize_device(device):
+    device_type = device.type if isinstance(device, torch.device) else str(device).split(":", 1)[0]
+    if device_type == "cuda" and torch.cuda.is_available():
+        torch.cuda.synchronize()
+    elif device_type == "mps" and hasattr(torch, "mps") and torch.backends.mps.is_available():
+        torch.mps.synchronize()
+
+
+def clear_device_cache(device):
+    device_type = device.type if isinstance(device, torch.device) else str(device).split(":", 1)[0]
+    if device_type == "cuda" and torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    elif device_type == "mps" and hasattr(torch, "mps") and torch.backends.mps.is_available():
+        torch.mps.empty_cache()
+
+
+def reset_device_memory_stats(device):
+    device_type = device.type if isinstance(device, torch.device) else str(device).split(":", 1)[0]
+    if device_type == "cuda" and torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats(device)
+
+
+def get_device_memory_usage(device):
+    device = torch.device(device)
+    synchronize_device(device)
+    if device.type == "cuda" and torch.cuda.is_available():
+        return {
+            "device_type": "cuda",
+            "memory_allocated": torch.cuda.memory_allocated(device),
+            "memory_reserved": torch.cuda.memory_reserved(device),
+            "max_memory_allocated": torch.cuda.max_memory_allocated(device),
+            "max_memory_reserved": torch.cuda.max_memory_reserved(device),
+        }
+    if device.type == "mps" and hasattr(torch, "mps") and torch.backends.mps.is_available():
+        return {
+            "device_type": "mps",
+            "current_allocated_memory": torch.mps.current_allocated_memory(),
+            "driver_allocated_memory": torch.mps.driver_allocated_memory(),
+            "recommended_max_memory": torch.mps.recommended_max_memory(),
+        }
+    return {"device_type": device.type}
+
+
 def run_eval(
         model,
         tokenizer,
@@ -119,8 +162,9 @@ def get_model_answers(
     model.eval()
     print('Check model training state:', model.training)
 
-    cuda_visible_devices = os.environ.get('CUDA_VISIBLE_DEVICES')
-    print('CUDA VISIBLE DEVICES:', cuda_visible_devices)
+    device = torch.device(kwargs.pop("device"))
+    clear_cache_after_question = kwargs.pop("clear_cache_after_question", False)
+    print('Device:', device)
 
     question = questions[0]
 
@@ -138,10 +182,10 @@ def get_model_answers(
             conv.append_message(conv.roles[1], None)
             conv.stop_str = "</s>"
             prompt = conv.get_prompt()
-            inputs = tokenizer([prompt], return_tensors="pt").to("cuda")
+            inputs = tokenizer([prompt], return_tensors="pt").to(device)
             input_ids = inputs.input_ids
             try:
-                torch.cuda.synchronize()
+                synchronize_device(device)
                 start_time = time.time()
                 output_ids, new_token, step, accept_length_tree = forward_func(
                     inputs,
@@ -150,7 +194,7 @@ def get_model_answers(
                     max_new_tokens,
                     **kwargs,
                 )
-                torch.cuda.synchronize()
+                synchronize_device(device)
                 total_time = time.time() - start_time
                 output_ids = output_ids[0][len(input_ids[0]):]
                 # be consistent with the template's stop_token_ids
@@ -194,6 +238,7 @@ def get_model_answers(
     for question in tqdm(questions):
         memory_sampler = MemorySampler(interval_seconds=2.0)
         memory_sampler.start()
+        reset_device_memory_stats(device)
 
         choices = []
         for i in range(num_choices):
@@ -210,10 +255,10 @@ def get_model_answers(
                 conv.append_message(conv.roles[1], None)
                 conv.stop_str = "</s>"
                 prompt = conv.get_prompt()
-                inputs = tokenizer([prompt], return_tensors="pt").to("cuda")
+                inputs = tokenizer([prompt], return_tensors="pt").to(device)
                 input_ids = inputs.input_ids
                 try:
-                    torch.cuda.synchronize()
+                    synchronize_device(device)
                     start_time = time.time()
                     output_ids, new_token, step, accept_length_tree = forward_func(
                         inputs,
@@ -222,7 +267,7 @@ def get_model_answers(
                         max_new_tokens,
                         **kwargs,
                     )
-                    torch.cuda.synchronize()
+                    synchronize_device(device)
                     total_time = time.time() - start_time
                     accept_lengths_tree.extend(accept_length_tree)
                     output_ids = output_ids[0][len(input_ids[0]):]
@@ -267,6 +312,10 @@ def get_model_answers(
                             "accept_lengths": cur_accept_lengths_tree})
 
         memory_sampler.stop()
+        device_memory_usage = get_device_memory_usage(device)
+        if clear_cache_after_question:
+            clear_device_cache(device)
+            synchronize_device(device)
 
         tstamp = time.time()
         physical_memory_usage = memory_sampler.mean_rss()
@@ -282,6 +331,7 @@ def get_model_answers(
                 "choices": choices,
                 "tstamp": tstamp,
                 "memory_usage": physical_memory_usage,
+                "device_memory_usage": device_memory_usage,
             }
             fout.write(json.dumps(ans_json) + "\n")
     print("#Mean accepted tokens: ", np.mean(accept_lengths_tree))

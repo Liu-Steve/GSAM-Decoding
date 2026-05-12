@@ -21,16 +21,29 @@ from transformers.generation.logits_process import (
 )
 
 
+def synchronize_device(device: torch.device):
+    if device.type == "cuda" and torch.cuda.is_available():
+        torch.cuda.synchronize()
+    elif device.type == "mps" and hasattr(torch, "mps") and torch.backends.mps.is_available():
+        torch.mps.synchronize()
+
+
 class Timer:
     def __init__(self, name):
         self.name = name
+        if torch.cuda.is_available():
+            self.device = torch.device("cuda")
+        elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            self.device = torch.device("mps")
+        else:
+            self.device = torch.device("cpu")
 
     def __enter__(self):
-        torch.cuda.synchronize()
+        synchronize_device(self.device)
         self.start = time.perf_counter()
 
     def __exit__(self, exc_type, exc_value, traceback):
-        torch.cuda.synchronize()
+        synchronize_device(self.device)
         elapsed = time.perf_counter() - self.start
         print(f"{self.name} took {elapsed} seconds")
 

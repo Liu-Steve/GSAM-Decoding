@@ -65,6 +65,22 @@ def parse_args():
     parser.add_argument("--attn_implementation", type=str, default="sdpa")
     parser.add_argument("--use_gsam", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--use_small_dict", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument(
+        "--samd_map_type",
+        type=str,
+        default="",
+        choices=["", "lazy", "unordered", "int32", "lazy_int32"],
+        help=(
+            "runtime transition map backend for static/dynamic SAM. Empty keeps "
+            "the map metadata stored in the static SAM file."
+        ),
+    )
+    parser.add_argument(
+        "--samd_lazy_threshold",
+        type=int,
+        default=1,
+        help="runtime inline transition threshold for lazy map backends",
+    )
     return parser.parse_args()
 
 
@@ -94,7 +110,15 @@ if __name__ == "__main__":
     tokenizer = AutoTokenizer.from_pretrained(args.model_path)
 
     device = next(model.lm_head.parameters()).device
-    sam = load_sam(args.static_sam_path) if args.static_sam_path is not None else None
+    sam = (
+        load_sam(
+            args.static_sam_path,
+            map_type=args.samd_map_type,
+            lazy_threshold=args.samd_lazy_threshold,
+        )
+        if args.static_sam_path is not None
+        else None
+    )
     if sam is not None:
         sam.device = device
     samd_config = SamdConfig(
@@ -106,6 +130,8 @@ if __name__ == "__main__":
         tree_path=args.samd_tree_path,
         use_gsam=args.use_gsam,
         use_small_dict=args.use_small_dict,
+        map_type=args.samd_map_type,
+        lazy_threshold=args.samd_lazy_threshold,
     )
     draft = DraftModel(
         samd_config,

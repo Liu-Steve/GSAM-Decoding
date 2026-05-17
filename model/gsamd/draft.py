@@ -22,11 +22,14 @@ class DraftModel(torch.nn.Module):
     ) -> None:
         super().__init__()
         static_use_gsam = getattr(sam_static, "use_gsam", config.use_gsam)
-        static_use_small_dict = getattr(sam_static, "use_small_dict", config.use_small_dict)
+        runtime_map_type = getattr(sam_static, "map_type", config.map_type)
+        runtime_lazy_threshold = getattr(sam_static, "lazy_threshold", config.lazy_threshold)
+        runtime_use_small_dict = runtime_map_type == "lazy"
         print(
-            "GSAMD config: use_gsam={}, use_small_dict={}".format(
+            "GSAMD config: use_gsam={}, map_type={}, lazy_threshold={}".format(
                 static_use_gsam,
-                static_use_small_dict,
+                runtime_map_type,
+                runtime_lazy_threshold,
             )
         )
         self.config = config
@@ -34,13 +37,17 @@ class DraftModel(torch.nn.Module):
             config.n_predicts,
             device=device,
             use_gsam=static_use_gsam,
-            use_small_dict=static_use_small_dict,
+            use_small_dict=runtime_use_small_dict,
+            map_type=runtime_map_type,
+            lazy_threshold=runtime_lazy_threshold,
         )
         self.sam_static = sam_static if sam_static is not None else NullStaticSAM(
             config.n_predicts,
             device=device,
             use_gsam=static_use_gsam,
-            use_small_dict=static_use_small_dict,
+            use_small_dict=runtime_use_small_dict,
+            map_type=runtime_map_type,
+            lazy_threshold=runtime_lazy_threshold,
         )
         if config.tree_method is not None:
             tree_cls = tree_model_cls[config.tree_method]

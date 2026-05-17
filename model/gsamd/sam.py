@@ -25,9 +25,18 @@ class DynSAM:
         device: str = "cuda",
         use_gsam: bool = True,
         use_small_dict: bool = True,
+        map_type: str = "",
+        lazy_threshold: int = 1,
     ):
         self.device = device
-        self.core = _gsamd_core.DynSAMCore(n_predicts, alpha, use_gsam, use_small_dict)
+        self.core = _gsamd_core.DynSAMCore(
+            n_predicts,
+            alpha,
+            use_gsam,
+            use_small_dict,
+            map_type,
+            lazy_threshold,
+        )
 
     @property
     def n_predicts(self):
@@ -44,6 +53,14 @@ class DynSAM:
     @property
     def use_small_dict(self):
         return self.core.use_small_dict
+
+    @property
+    def map_type(self):
+        return self.core.map_type
+
+    @property
+    def lazy_threshold(self):
+        return self.core.lazy_threshold
 
     def reset(self):
         self.core.reset()
@@ -72,6 +89,9 @@ class DynSAM:
     def edge_stats(self):
         return self.core.edge_stats()
 
+    def transition_memory_usage(self):
+        return self.core.transition_memory_usage()
+
 
 class StaticSAM:
     def __init__(
@@ -82,12 +102,20 @@ class StaticSAM:
         device: str = "cuda",
         use_gsam: bool = True,
         use_small_dict: bool = True,
+        map_type: str = "",
+        lazy_threshold: int = 1,
         core=None,
     ):
         self.device = device
         self.K = K
         self.core = core if core is not None else _gsamd_core.StaticSAMCore(
-            n_predicts, alpha, K, use_gsam, use_small_dict
+            n_predicts,
+            alpha,
+            K,
+            use_gsam,
+            use_small_dict,
+            map_type,
+            lazy_threshold,
         )
 
     @staticmethod
@@ -101,16 +129,30 @@ class StaticSAM:
         device: str = "cuda",
         use_gsam: bool = True,
         use_small_dict: bool = True,
+        map_type: str = "",
+        lazy_threshold: int = 1,
     ):
-        sam = StaticSAM(n_predicts, alpha, K, device, use_gsam, use_small_dict)
+        sam = StaticSAM(
+            n_predicts,
+            alpha,
+            K,
+            device,
+            use_gsam,
+            use_small_dict,
+            map_type,
+            lazy_threshold,
+        )
         sam.core.add_batch_tokens(batch_tokens, eos_token, True)
         sam.core.init_topk_next()
         stats = sam.core.edge_stats()
         print(
-            "single-next states: {} ({:.6f}), total states: {}".format(
+            "single-next states: {} ({:.6f}), total states: {}, map_type: {}, lazy_threshold: {}, transition bytes: {}".format(
                 stats.single_next_states,
                 stats.ratio,
                 stats.total_states,
+                sam.map_type,
+                sam.lazy_threshold,
+                sam.transition_memory_usage(),
             )
         )
         return sam
@@ -130,6 +172,14 @@ class StaticSAM:
     @property
     def use_small_dict(self):
         return self.core.use_small_dict
+
+    @property
+    def map_type(self):
+        return self.core.map_type
+
+    @property
+    def lazy_threshold(self):
+        return self.core.lazy_threshold
 
     def transfer_tokens(self, tokens: List[int]):
         self.core.transfer_tokens(tokens)
@@ -190,6 +240,9 @@ class StaticSAM:
     def edge_stats(self):
         return self.core.edge_stats()
 
+    def transition_memory_usage(self):
+        return self.core.transition_memory_usage()
+
 
 class NullStaticSAM(StaticSAM):
     def __init__(self, n_predicts=40, *args, **kwargs):
@@ -213,6 +266,8 @@ def build_sam(
     K: int = 8,
     use_gsam: bool = True,
     use_small_dict: bool = True,
+    map_type: str = "",
+    lazy_threshold: int = 1,
 ):
     return StaticSAM.build(
         batch_tokens,
@@ -222,6 +277,8 @@ def build_sam(
         K=K,
         use_gsam=use_gsam,
         use_small_dict=use_small_dict,
+        map_type=map_type,
+        lazy_threshold=lazy_threshold,
     )
 
 
@@ -229,10 +286,14 @@ def dump_sam(path: str, sam: StaticSAM):
     sam.save(path)
 
 
-def load_sam(path: str):
+def load_sam(path: str, map_type: str = "", lazy_threshold: int = 1):
     print("load gsam...")
     start = time.perf_counter()
-    core = _gsamd_core.StaticSAMCore.load(os.path.expanduser(path))
+    core = _gsamd_core.StaticSAMCore.load(
+        os.path.expanduser(path),
+        map_type,
+        lazy_threshold,
+    )
     sam = StaticSAM(core=core)
     end = time.perf_counter()
     print("loading ended in {} seconds.".format(end - start))

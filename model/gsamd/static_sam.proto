@@ -2,9 +2,17 @@ syntax = "proto3";
 
 package gsamd;
 
+enum TransitionMapType {
+  TRANSITION_MAP_LAZY = 0;
+  TRANSITION_MAP_UNORDERED = 1;
+  TRANSITION_MAP_INT32 = 2;
+  TRANSITION_MAP_LAZY_INT32 = 3;
+}
+
 message StaticSamFile {
   uint32 version = 1;
   bool use_gsam = 2;
+  // Deprecated compatibility bit. New readers use map_type.
   bool use_small_dict = 3;
   int64 n_predicts = 4;
   double alpha = 5;
@@ -12,6 +20,8 @@ message StaticSamFile {
   repeated int64 input_ids = 7 [packed = true];
   repeated int64 boundary_end = 8 [packed = true];
   repeated State states = 9;
+  TransitionMapType map_type = 10;
+  int64 lazy_threshold = 11;
 }
 
 message State {
@@ -24,6 +34,6 @@ message State {
 }
 
 message Edge {
-  int64 token = 1;
-  int64 state = 2;
+  int32 token = 1;
+  int32 state = 2;
 }

@@ -43,6 +43,43 @@ def test_static_sam_lookup_and_tree_draft(use_small_dict):
     assert buffers["tree_attn_mask"].device.type == "cpu"
 
 
+@pytest.mark.parametrize(
+    ("map_type", "lazy_threshold"),
+    [
+        ("unordered", 1),
+        ("lazy", 1),
+        ("lazy", 2),
+        ("lazy", 3),
+        ("lazy", 4),
+        ("lazy", 5),
+        ("int32", 1),
+        ("lazy_int32", 1),
+        ("lazy_int32", 3),
+        ("lazy_int32", 5),
+    ],
+)
+def test_static_sam_map_backends_build_same_language(map_type, lazy_threshold):
+    sam = StaticSAM.build(
+        [[1, 2, 3], [1, 2, 4], [5, 6]],
+        eos_token=0,
+        n_predicts=5,
+        device="cpu",
+        use_gsam=True,
+        use_small_dict=(map_type == "lazy"),
+        map_type=map_type,
+        lazy_threshold=lazy_threshold,
+    )
+
+    sam.transfer_tokens([1])
+    index, match = sam.lookup(2)
+
+    assert sam.map_type == map_type
+    assert sam.lazy_threshold == lazy_threshold
+    assert sam.transition_memory_usage() > 0
+    assert match == 2
+    assert sam.gen_draft(index, 2) in ([2, 3, 0, 0, 0], [2, 4, 0, 0, 0])
+
+
 def test_static_sam_protobuf_round_trip_preserves_flags_and_lookup(tmp_path):
     path = tmp_path / "static_gsam.pb"
     sam = build_sam(
@@ -51,6 +88,8 @@ def test_static_sam_protobuf_round_trip_preserves_flags_and_lookup(tmp_path):
         n_predicts=4,
         use_gsam=True,
         use_small_dict=True,
+        map_type="lazy",
+        lazy_threshold=3,
     )
     dump_sam(str(path), sam)
 
@@ -61,8 +100,60 @@ def test_static_sam_protobuf_round_trip_preserves_flags_and_lookup(tmp_path):
 
     assert loaded.use_gsam is True
     assert loaded.use_small_dict is True
+    assert loaded.map_type == "lazy"
+    assert loaded.lazy_threshold == 3
     assert match == 2
     assert loaded.gen_draft(index, 11) in ([11, 12, 0, 0], [11, 13, 0, 0])
+
+
+def test_static_sam_protobuf_round_trip_preserves_int32_map(tmp_path):
+    path = tmp_path / "static_gsam_int32.pb"
+    sam = build_sam(
+        [[10, 11, 12], [10, 11, 13]],
+        eos_token=0,
+        n_predicts=4,
+        use_gsam=True,
+        use_small_dict=False,
+        map_type="int32",
+    )
+    dump_sam(str(path), sam)
+
+    loaded = load_sam(str(path))
+
+    assert loaded.map_type == "int32"
+    assert loaded.use_small_dict is False
+    loaded.transfer_tokens([10])
+    assert loaded.lookup(11)[1] == 2
+
+
+def test_static_sam_load_can_override_map_type_from_same_file(tmp_path):
+    path = tmp_path / "static_gsam_prototype.pb"
+    sam = build_sam(
+        [[1, 2, 3], [1, 2, 4], [5, 6]],
+        eos_token=0,
+        n_predicts=5,
+        use_gsam=True,
+        use_small_dict=True,
+        map_type="lazy",
+        lazy_threshold=1,
+    )
+    dump_sam(str(path), sam)
+
+    for map_type, lazy_threshold in [
+        ("unordered", 1),
+        ("lazy", 4),
+        ("int32", 1),
+        ("lazy_int32", 3),
+    ]:
+        loaded = load_sam(str(path), map_type=map_type, lazy_threshold=lazy_threshold)
+        loaded.transfer_tokens([1])
+        index, match = loaded.lookup(2)
+
+        assert loaded.use_gsam is True
+        assert loaded.map_type == map_type
+        assert loaded.lazy_threshold == lazy_threshold
+        assert match == 2
+        assert loaded.gen_draft(index, 2) in ([2, 3, 0, 0, 0], [2, 4, 0, 0, 0])
 
 
 def test_small_dict_and_hash_map_build_same_language_size():

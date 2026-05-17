@@ -2,6 +2,7 @@
 #include <pybind11/stl.h>
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <cstring>
 #include <fstream>
@@ -14,90 +15,222 @@
 #include <utility>
 #include <vector>
 
+#include "int32_map.h"
+
 namespace py = pybind11;
 
 using i64 = std::int64_t;
+using i32 = std::int32_t;
+
+enum class TransitionMapKind : i32 {
+    kLazy = 0,
+    kUnordered = 1,
+    kInt32 = 2,
+    kLazyInt32 = 3,
+};
+
+i32 checked_i32(i64 value, const char* name) {
+    if (value < std::numeric_limits<i32>::min() || value > std::numeric_limits<i32>::max()) {
+        throw std::overflow_error(std::string(name) + " does not fit in int32_t");
+    }
+    return static_cast<i32>(value);
+}
+
+TransitionMapKind transition_map_kind_from_name(const std::string& name, bool use_small_dict) {
+    if (name.empty()) {
+        return use_small_dict ? TransitionMapKind::kLazy : TransitionMapKind::kUnordered;
+    }
+    if (name == "lazy" || name == "small" || name == "small_dict") {
+        return TransitionMapKind::kLazy;
+    }
+    if (name == "unordered" || name == "normal" || name == "normal_dict") {
+        return TransitionMapKind::kUnordered;
+    }
+    if (name == "int32" || name == "suffix" || name == "suffix_map") {
+        return TransitionMapKind::kInt32;
+    }
+    if (name == "lazy_int32" || name == "lazy_suffix" || name == "lazy_suffix_map") {
+        return TransitionMapKind::kLazyInt32;
+    }
+    throw std::invalid_argument("Unknown transition map type: " + name);
+}
+
+std::string transition_map_kind_name(TransitionMapKind kind) {
+    switch (kind) {
+        case TransitionMapKind::kLazy:
+            return "lazy";
+        case TransitionMapKind::kUnordered:
+            return "unordered";
+        case TransitionMapKind::kInt32:
+            return "int32";
+        case TransitionMapKind::kLazyInt32:
+            return "lazy_int32";
+    }
+    return "unknown";
+}
 
 class TransitionMap {
 public:
-    explicit TransitionMap(bool use_small_dict = true) : use_small_dict_(use_small_dict) {
-        if (!use_small_dict_) {
-            map_ = std::make_unique<std::unordered_map<i64, i64>>();
-        }
-    }
+    virtual ~TransitionMap() = default;
+    virtual bool contains(i64 key) const = 0;
+    virtual i64 get(i64 key) const = 0;
+    virtual void set(i64 key, i64 value) = 0;
+    virtual std::size_t size() const = 0;
+    virtual std::vector<std::pair<i64, i64>> items() const = 0;
+    virtual std::size_t memory_usage() const = 0;
+    virtual std::unique_ptr<TransitionMap> clone() const = 0;
+};
 
-    TransitionMap(const TransitionMap& other)
-        : use_small_dict_(other.use_small_dict_),
-          has_single_(other.has_single_),
-          single_key_(other.single_key_),
-          single_value_(other.single_value_) {
-        if (other.map_) {
-            map_ = std::make_unique<std::unordered_map<i64, i64>>(*other.map_);
-        }
-    }
-
-    TransitionMap& operator=(const TransitionMap& other) {
-        if (this == &other) {
-            return *this;
-        }
-        use_small_dict_ = other.use_small_dict_;
-        has_single_ = other.has_single_;
-        single_key_ = other.single_key_;
-        single_value_ = other.single_value_;
-        map_.reset();
-        if (other.map_) {
-            map_ = std::make_unique<std::unordered_map<i64, i64>>(*other.map_);
-        }
-        return *this;
-    }
-
+class UnorderedTransitionMap final : public TransitionMap {
+public:
     bool contains(i64 key) const {
-        if (map_) {
-            return map_->find(key) != map_->end();
-        }
-        return has_single_ && single_key_ == key;
+        i32 k = checked_i32(key, "transition key");
+        return map_.find(k) != map_.end();
     }
 
     i64 get(i64 key) const {
+        i32 k = checked_i32(key, "transition key");
+        auto it = map_.find(k);
+        if (it == map_.end()) {
+            return -1;
+        }
+        return it->second;
+    }
+
+    void set(i64 key, i64 value) {
+        map_[checked_i32(key, "transition key")] = checked_i32(value, "transition state");
+    }
+
+    std::size_t size() const {
+        return map_.size();
+    }
+
+    std::vector<std::pair<i64, i64>> items() const {
+        std::vector<std::pair<i64, i64>> out;
+        out.reserve(map_.size());
+        for (const auto& item : map_) {
+            out.emplace_back(item.first, item.second);
+        }
+        return out;
+    }
+
+    std::size_t memory_usage() const {
+        using NodeValue = std::pair<const i32, i32>;
+        return sizeof(*this) + map_.bucket_count() * sizeof(void*) +
+               map_.size() * (sizeof(NodeValue) + sizeof(void*));
+    }
+
+    std::unique_ptr<TransitionMap> clone() const {
+        return std::make_unique<UnorderedTransitionMap>(*this);
+    }
+
+private:
+    std::unordered_map<i32, i32> map_;
+};
+
+class Int32TransitionMap final : public TransitionMap {
+public:
+    bool contains(i64 key) const {
+        i32 k = checked_i32(key, "transition key");
+        return map_.find(k) != map_.end();
+    }
+
+    i64 get(i64 key) const {
+        i32 k = checked_i32(key, "transition key");
+        auto it = map_.find(k);
+        if (it == map_.end()) {
+            return -1;
+        }
+        return it->second;
+    }
+
+    void set(i64 key, i64 value) {
+        map_[checked_i32(key, "transition key")] = checked_i32(value, "transition state");
+    }
+
+    std::size_t size() const {
+        return map_.size();
+    }
+
+    std::vector<std::pair<i64, i64>> items() const {
+        std::vector<std::pair<i64, i64>> out;
+        out.reserve(map_.size());
+        for (const auto& item : map_) {
+            out.emplace_back(item.first, item.second);
+        }
+        return out;
+    }
+
+    std::size_t memory_usage() const {
+        return sizeof(*this) + map_.memory_usage() - sizeof(map_);
+    }
+
+    std::unique_ptr<TransitionMap> clone() const {
+        auto copy = std::make_unique<Int32TransitionMap>();
+        for (const auto& item : map_) {
+            copy->map_[item.first] = item.second;
+        }
+        return copy;
+    }
+
+private:
+    Int32Map<i32> map_;
+};
+
+template <std::size_t InlineCapacity>
+class LazyTransitionMap final : public TransitionMap {
+public:
+    bool contains(i64 key) const {
+        return get(key) != -1;
+    }
+
+    i64 get(i64 key) const {
+        i32 k = checked_i32(key, "transition key");
         if (map_) {
-            auto it = map_->find(key);
+            auto it = map_->find(k);
             if (it == map_->end()) {
                 return -1;
             }
             return it->second;
         }
-        if (has_single_ && single_key_ == key) {
-            return single_value_;
+        for (std::uint8_t i = 0; i < size_; ++i) {
+            if (keys_[i] == k) {
+                return values_[i];
+            }
         }
         return -1;
     }
 
     void set(i64 key, i64 value) {
+        i32 k = checked_i32(key, "transition key");
+        i32 v = checked_i32(value, "transition state");
         if (map_) {
-            (*map_)[key] = value;
+            (*map_)[k] = v;
             return;
         }
-        if (!has_single_) {
-            has_single_ = true;
-            single_key_ = key;
-            single_value_ = value;
+        for (std::uint8_t i = 0; i < size_; ++i) {
+            if (keys_[i] == k) {
+                values_[i] = v;
+                return;
+            }
+        }
+        if (size_ < InlineCapacity) {
+            keys_[size_] = k;
+            values_[size_] = v;
+            ++size_;
             return;
         }
-        if (single_key_ == key) {
-            single_value_ = value;
-            return;
+        map_ = std::make_unique<std::unordered_map<i32, i32>>();
+        map_->reserve(InlineCapacity + 1);
+        for (std::uint8_t i = 0; i < size_; ++i) {
+            (*map_)[keys_[i]] = values_[i];
         }
-        map_ = std::make_unique<std::unordered_map<i64, i64>>();
-        (*map_)[single_key_] = single_value_;
-        (*map_)[key] = value;
-        has_single_ = false;
+        (*map_)[k] = v;
+        size_ = 0;
     }
 
     std::size_t size() const {
-        if (map_) {
-            return map_->size();
-        }
-        return has_single_ ? 1 : 0;
+        return map_ ? map_->size() : size_;
     }
 
     std::vector<std::pair<i64, i64>> items() const {
@@ -105,27 +238,214 @@ public:
         out.reserve(size());
         if (map_) {
             for (const auto& item : *map_) {
-                out.push_back(item);
+                out.emplace_back(item.first, item.second);
             }
-        } else if (has_single_) {
-            out.emplace_back(single_key_, single_value_);
+            return out;
+        }
+        for (std::uint8_t i = 0; i < size_; ++i) {
+            out.emplace_back(keys_[i], values_[i]);
         }
         return out;
     }
 
+    std::size_t memory_usage() const {
+        using NodeValue = std::pair<const i32, i32>;
+        std::size_t bytes = sizeof(*this);
+        if (map_) {
+            bytes += sizeof(*map_) + map_->bucket_count() * sizeof(void*) +
+                     map_->size() * (sizeof(NodeValue) + sizeof(void*));
+        }
+        return bytes;
+    }
+
+    std::unique_ptr<TransitionMap> clone() const {
+        auto copy = std::make_unique<LazyTransitionMap<InlineCapacity>>();
+        copy->size_ = size_;
+        copy->keys_ = keys_;
+        copy->values_ = values_;
+        if (map_) {
+            copy->map_ = std::make_unique<std::unordered_map<i32, i32>>(*map_);
+        }
+        return copy;
+    }
+
 private:
-    bool use_small_dict_ = true;
-    bool has_single_ = false;
-    i64 single_key_ = 0;
-    i64 single_value_ = 0;
-    std::unique_ptr<std::unordered_map<i64, i64>> map_;
+    std::array<i32, InlineCapacity> keys_{};
+    std::array<i32, InlineCapacity> values_{};
+    std::uint8_t size_ = 0;
+    std::unique_ptr<std::unordered_map<i32, i32>> map_;
 };
 
-struct State {
-    explicit State(bool use_small_dict = true, i64 link_ = -1, i64 length_ = 0)
-        : next(use_small_dict), link(link_), length(length_) {}
+template <std::size_t InlineCapacity>
+class LazyInt32TransitionMap final : public TransitionMap {
+public:
+    bool contains(i64 key) const {
+        return get(key) != -1;
+    }
 
-    TransitionMap next;
+    i64 get(i64 key) const {
+        i32 k = checked_i32(key, "transition key");
+        if (map_) {
+            auto it = map_->find(k);
+            if (it == map_->end()) {
+                return -1;
+            }
+            return it->second;
+        }
+        for (std::uint8_t i = 0; i < size_; ++i) {
+            if (keys_[i] == k) {
+                return values_[i];
+            }
+        }
+        return -1;
+    }
+
+    void set(i64 key, i64 value) {
+        i32 k = checked_i32(key, "transition key");
+        i32 v = checked_i32(value, "transition state");
+        if (map_) {
+            (*map_)[k] = v;
+            return;
+        }
+        for (std::uint8_t i = 0; i < size_; ++i) {
+            if (keys_[i] == k) {
+                values_[i] = v;
+                return;
+            }
+        }
+        if (size_ < InlineCapacity) {
+            keys_[size_] = k;
+            values_[size_] = v;
+            ++size_;
+            return;
+        }
+        map_ = std::make_unique<Int32Map<i32>>();
+        for (std::uint8_t i = 0; i < size_; ++i) {
+            (*map_)[keys_[i]] = values_[i];
+        }
+        (*map_)[k] = v;
+        size_ = 0;
+    }
+
+    std::size_t size() const {
+        return map_ ? map_->size() : size_;
+    }
+
+    std::vector<std::pair<i64, i64>> items() const {
+        std::vector<std::pair<i64, i64>> out;
+        out.reserve(size());
+        if (map_) {
+            for (const auto& item : *map_) {
+                out.emplace_back(item.first, item.second);
+            }
+            return out;
+        }
+        for (std::uint8_t i = 0; i < size_; ++i) {
+            out.emplace_back(keys_[i], values_[i]);
+        }
+        return out;
+    }
+
+    std::size_t memory_usage() const {
+        std::size_t bytes = sizeof(*this);
+        if (map_) {
+            bytes += map_->memory_usage();
+        }
+        return bytes;
+    }
+
+    std::unique_ptr<TransitionMap> clone() const {
+        auto copy = std::make_unique<LazyInt32TransitionMap<InlineCapacity>>();
+        copy->size_ = size_;
+        copy->keys_ = keys_;
+        copy->values_ = values_;
+        if (map_) {
+            copy->map_ = std::make_unique<Int32Map<i32>>();
+            for (const auto& item : *map_) {
+                (*copy->map_)[item.first] = item.second;
+            }
+        }
+        return copy;
+    }
+
+private:
+    std::array<i32, InlineCapacity> keys_{};
+    std::array<i32, InlineCapacity> values_{};
+    std::uint8_t size_ = 0;
+    std::unique_ptr<Int32Map<i32>> map_;
+};
+
+std::unique_ptr<TransitionMap> make_transition_map(TransitionMapKind kind, i64 lazy_threshold) {
+    switch (kind) {
+        case TransitionMapKind::kLazy:
+            switch (lazy_threshold) {
+                case 1:
+                    return std::make_unique<LazyTransitionMap<1>>();
+                case 2:
+                    return std::make_unique<LazyTransitionMap<2>>();
+                case 3:
+                    return std::make_unique<LazyTransitionMap<3>>();
+                case 4:
+                    return std::make_unique<LazyTransitionMap<4>>();
+                case 5:
+                    return std::make_unique<LazyTransitionMap<5>>();
+                default:
+                    throw std::invalid_argument("lazy_threshold must be in [1, 5]");
+            }
+        case TransitionMapKind::kUnordered:
+            return std::make_unique<UnorderedTransitionMap>();
+        case TransitionMapKind::kInt32:
+            return std::make_unique<Int32TransitionMap>();
+        case TransitionMapKind::kLazyInt32:
+            switch (lazy_threshold) {
+                case 1:
+                    return std::make_unique<LazyInt32TransitionMap<1>>();
+                case 2:
+                    return std::make_unique<LazyInt32TransitionMap<2>>();
+                case 3:
+                    return std::make_unique<LazyInt32TransitionMap<3>>();
+                case 4:
+                    return std::make_unique<LazyInt32TransitionMap<4>>();
+                case 5:
+                    return std::make_unique<LazyInt32TransitionMap<5>>();
+                default:
+                    throw std::invalid_argument("lazy_threshold must be in [1, 5]");
+            }
+    }
+    throw std::invalid_argument("Unknown transition map kind");
+}
+
+struct State {
+    explicit State(
+        TransitionMapKind map_kind = TransitionMapKind::kLazy,
+        i64 lazy_threshold = 1,
+        i64 link_ = -1,
+        i64 length_ = 0)
+        : next(make_transition_map(map_kind, lazy_threshold)), link(link_), length(length_) {}
+
+    State(const State& other)
+        : next(other.next->clone()),
+          link(other.link),
+          length(other.length),
+          cnt_endpos(other.cnt_endpos),
+          min_endpos(other.min_endpos) {}
+
+    State& operator=(const State& other) {
+        if (this == &other) {
+            return *this;
+        }
+        next = other.next->clone();
+        link = other.link;
+        length = other.length;
+        cnt_endpos = other.cnt_endpos;
+        min_endpos = other.min_endpos;
+        return *this;
+    }
+
+    State(State&&) noexcept = default;
+    State& operator=(State&&) noexcept = default;
+
+    std::unique_ptr<TransitionMap> next;
     i64 link = -1;
     i64 length = 0;
     i64 cnt_endpos = 0;
@@ -145,7 +465,7 @@ struct EdgeStats {
 
 namespace proto {
 
-constexpr std::uint32_t kVersion = 1;
+constexpr std::uint32_t kVersion = 2;
 constexpr std::uint32_t kWireVarint = 0;
 constexpr std::uint32_t kWireFixed64 = 1;
 constexpr std::uint32_t kWireLengthDelimited = 2;
@@ -256,14 +576,28 @@ std::vector<i64> read_packed_ints(const std::string& data, std::size_t& pos) {
 
 }  // namespace proto
 
+TransitionMapKind normalize_transition_map_kind(bool use_small_dict, const std::string& map_type) {
+    return transition_map_kind_from_name(map_type, use_small_dict);
+}
+
 class SamBase {
 public:
-    SamBase(i64 n_predicts, double alpha, i64 k, bool use_gsam, bool use_small_dict)
+    SamBase(
+        i64 n_predicts,
+        double alpha,
+        i64 k,
+        bool use_gsam,
+        bool use_small_dict,
+        TransitionMapKind map_kind,
+        i64 lazy_threshold)
         : n_predicts_(n_predicts),
           alpha_(alpha),
           k_(k),
           use_gsam_(use_gsam),
-          use_small_dict_(use_small_dict) {
+          use_small_dict_(map_kind == TransitionMapKind::kLazy),
+          map_kind_(map_kind),
+          lazy_threshold_(lazy_threshold) {
+        (void)use_small_dict;
         reset_storage();
     }
 
@@ -307,7 +641,7 @@ public:
         EdgeStats stats;
         stats.total_states = static_cast<i64>(states_.size());
         for (const State& state : states_) {
-            if (state.next.size() == 1) {
+            if (state.next->size() == 1) {
                 stats.single_next_states += 1;
             }
         }
@@ -326,6 +660,25 @@ public:
         return use_small_dict_;
     }
 
+    std::string map_type() const {
+        return transition_map_kind_name(map_kind_);
+    }
+
+    i64 lazy_threshold() const {
+        return lazy_threshold_;
+    }
+
+    i64 transition_memory_usage() const {
+        std::size_t bytes = sizeof(*this) + states_.capacity() * sizeof(State);
+        for (const State& state : states_) {
+            bytes += state.next->memory_usage();
+        }
+        if (bytes > static_cast<std::size_t>(std::numeric_limits<i64>::max())) {
+            throw std::overflow_error("transition memory usage does not fit in int64_t");
+        }
+        return static_cast<i64>(bytes);
+    }
+
     i64 n_predicts() const {
         return n_predicts_;
     }
@@ -337,7 +690,7 @@ public:
 protected:
     void reset_storage() {
         states_.clear();
-        states_.emplace_back(use_small_dict_, -1, 0);
+        states_.emplace_back(map_kind_, lazy_threshold_, -1, 0);
         input_ids_.clear();
         input_ids_.push_back(-1);
         boundary_end_.clear();
@@ -355,18 +708,18 @@ protected:
 
     i64 extend_standard(i64 token, i64 endpos) {
         max_length_ += 1;
-        State cur_state(use_small_dict_, -1, max_length_);
+        State cur_state(map_kind_, lazy_threshold_, -1, max_length_);
         cur_state.min_endpos = endpos;
         i64 cur = expand_state(cur_state);
         i64 p = last_;
-        while (p != -1 && !states_[p].next.contains(token)) {
-            states_[p].next.set(token, cur);
+        while (p != -1 && !states_[p].next->contains(token)) {
+            states_[p].next->set(token, cur);
             p = states_[p].link;
         }
         if (p == -1) {
             states_[cur].link = 0;
         } else {
-            i64 q = states_[p].next.get(token);
+            i64 q = states_[p].next->get(token);
             if (states_[p].length + 1 == states_[q].length) {
                 states_[cur].link = q;
             } else {
@@ -374,8 +727,8 @@ protected:
                 i64 clone = expand_state(clone_state);
                 states_[clone].length = states_[p].length + 1;
                 states_[clone].cnt_endpos = 0;
-                while (p != -1 && states_[p].next.get(token) == q) {
-                    states_[p].next.set(token, clone);
+                while (p != -1 && states_[p].next->get(token) == q) {
+                    states_[p].next->set(token, clone);
                     p = states_[p].link;
                 }
                 states_[q].link = clone;
@@ -388,19 +741,19 @@ protected:
     }
 
     i64 extend_gsam(i64 last, i64 token, i64 endpos) {
-        i64 existing = states_[last].next.get(token);
+        i64 existing = states_[last].next->get(token);
         if (existing != -1 && states_[existing].length == states_[last].length + 1) {
             states_[existing].cnt_endpos += 1;
             return existing;
         }
 
         bool created_cur = true;
-        State cur_state(use_small_dict_, -1, states_[last].length + 1);
+        State cur_state(map_kind_, lazy_threshold_, -1, states_[last].length + 1);
         cur_state.min_endpos = endpos;
         i64 cur = expand_state(cur_state);
         i64 p = last;
-        while (p != -1 && !states_[p].next.contains(token)) {
-            states_[p].next.set(token, cur);
+        while (p != -1 && !states_[p].next->contains(token)) {
+            states_[p].next->set(token, cur);
             p = states_[p].link;
         }
         if (p == -1) {
@@ -408,7 +761,7 @@ protected:
             states_[cur].cnt_endpos += 1;
             return cur;
         }
-        i64 q = states_[p].next.get(token);
+        i64 q = states_[p].next->get(token);
         if (states_[p].length + 1 == states_[q].length) {
             states_[cur].link = q;
             states_[cur].cnt_endpos += 1;
@@ -423,8 +776,8 @@ protected:
         i64 clone = expand_state(clone_state);
         states_[clone].length = states_[p].length + 1;
         states_[clone].cnt_endpos = 0;
-        while (p != -1 && states_[p].next.get(token) == q) {
-            states_[p].next.set(token, clone);
+        while (p != -1 && states_[p].next->get(token) == q) {
+            states_[p].next->set(token, clone);
             p = states_[p].link;
         }
         states_[q].link = clone;
@@ -438,12 +791,12 @@ protected:
     }
 
     std::pair<i64, i64> transfer_state(i64 index, i64 length, i64 token) const {
-        while (index != 0 && !states_[index].next.contains(token)) {
+        while (index != 0 && !states_[index].next->contains(token)) {
             index = states_[index].link;
             length = states_[index].length;
         }
-        if (states_[index].next.contains(token)) {
-            index = states_[index].next.get(token);
+        if (states_[index].next->contains(token)) {
+            index = states_[index].next->get(token);
             length += 1;
         } else {
             index = 0;
@@ -484,6 +837,8 @@ protected:
     i64 k_ = 8;
     bool use_gsam_ = true;
     bool use_small_dict_ = true;
+    TransitionMapKind map_kind_ = TransitionMapKind::kLazy;
+    i64 lazy_threshold_ = 1;
     std::vector<State> states_;
     std::vector<i64> input_ids_;
     std::vector<i64> boundary_end_;
@@ -496,8 +851,21 @@ protected:
 
 class DynSAMCore : public SamBase {
 public:
-    DynSAMCore(i64 n_predicts = 40, double alpha = 4.0, bool use_gsam = true, bool use_small_dict = true)
-        : SamBase(n_predicts, alpha, 8, use_gsam, use_small_dict) {
+    DynSAMCore(
+        i64 n_predicts = 40,
+        double alpha = 4.0,
+        bool use_gsam = true,
+        bool use_small_dict = true,
+        const std::string& map_type = "",
+        i64 lazy_threshold = 1)
+        : SamBase(
+              n_predicts,
+              alpha,
+              8,
+              use_gsam,
+              use_small_dict,
+              normalize_transition_map_kind(use_small_dict, map_type),
+              lazy_threshold) {
         print_config();
     }
 
@@ -533,14 +901,35 @@ public:
 
 private:
     void print_config() const {
-        py::print("GSAMD dynamic SAM config: use_gsam=", use_gsam_, ", use_small_dict=", use_small_dict_, py::arg("sep") = "");
+        py::print(
+            "GSAMD dynamic SAM config: use_gsam=",
+            use_gsam_,
+            ", map_type=",
+            map_type(),
+            ", lazy_threshold=",
+            lazy_threshold_,
+            py::arg("sep") = "");
     }
 };
 
 class StaticSAMCore : public SamBase {
 public:
-    StaticSAMCore(i64 n_predicts = 40, double alpha = 4.0, i64 k = 8, bool use_gsam = true, bool use_small_dict = true)
-        : SamBase(n_predicts, alpha, k, use_gsam, use_small_dict) {}
+    StaticSAMCore(
+        i64 n_predicts = 40,
+        double alpha = 4.0,
+        i64 k = 8,
+        bool use_gsam = true,
+        bool use_small_dict = true,
+        const std::string& map_type = "",
+        i64 lazy_threshold = 1)
+        : SamBase(
+              n_predicts,
+              alpha,
+              k,
+              use_gsam,
+              use_small_dict,
+              normalize_transition_map_kind(use_small_dict, map_type),
+              lazy_threshold) {}
 
     void add_batch_tokens(const std::vector<std::vector<i64>>& batch_tokens, i64 eos_token, bool add_eos = true) {
         reset_storage();
@@ -576,9 +965,17 @@ public:
     void init_topk_next() {
         states_topk_next_.assign(states_.size(), {});
         for (i64 index = 0; index < static_cast<i64>(states_.size()); ++index) {
-            auto edges = states_[index].next.items();
+            auto edges = states_[index].next->items();
             std::sort(edges.begin(), edges.end(), [this](const auto& lhs, const auto& rhs) {
-                return states_[lhs.second].cnt_endpos > states_[rhs.second].cnt_endpos;
+                i64 lhs_count = states_[lhs.second].cnt_endpos;
+                i64 rhs_count = states_[rhs.second].cnt_endpos;
+                if (lhs_count != rhs_count) {
+                    return lhs_count > rhs_count;
+                }
+                if (lhs.first != rhs.first) {
+                    return lhs.first < rhs.first;
+                }
+                return lhs.second < rhs.second;
             });
             if (static_cast<i64>(edges.size()) > k_) {
                 edges.resize(static_cast<std::size_t>(k_));
@@ -650,6 +1047,8 @@ public:
         for (i64 index = 0; index < static_cast<i64>(states_.size()); ++index) {
             proto::write_message(root, 9, encode_state(index));
         }
+        proto::write_int(root, 10, static_cast<i64>(map_kind_));
+        proto::write_int(root, 11, lazy_threshold_);
 
         std::ofstream out(path, std::ios::binary);
         if (!out) {
@@ -658,7 +1057,10 @@ public:
         out.write(root.data(), static_cast<std::streamsize>(root.size()));
     }
 
-    static StaticSAMCore load(const std::string& path) {
+    static StaticSAMCore load(
+        const std::string& path,
+        const std::string& map_type = "",
+        i64 lazy_threshold_override = 1) {
         std::ifstream in(path, std::ios::binary);
         if (!in) {
             throw std::runtime_error("Failed to open SAM file for reading: " + path);
@@ -671,6 +1073,9 @@ public:
         i64 n_predicts = 40;
         double alpha = 4.0;
         i64 k = 8;
+        bool saw_map_kind = false;
+        TransitionMapKind map_kind = TransitionMapKind::kLazy;
+        i64 lazy_threshold = 1;
         std::vector<i64> input_ids;
         std::vector<i64> boundary_end;
         std::vector<std::string> encoded_states;
@@ -703,15 +1108,33 @@ public:
                 }
                 encoded_states.emplace_back(data.substr(pos, static_cast<std::size_t>(len)));
                 pos += static_cast<std::size_t>(len);
+            } else if (field == 10) {
+                map_kind = static_cast<TransitionMapKind>(static_cast<i32>(proto::read_varint(data, pos)));
+                saw_map_kind = true;
+            } else if (field == 11) {
+                lazy_threshold = static_cast<i64>(proto::read_varint(data, pos));
             } else {
                 proto::skip_field(data, pos, wire);
             }
         }
 
-        if (version != proto::kVersion) {
+        if (version != 1 && version != proto::kVersion) {
             throw std::runtime_error("Unsupported GSAMD SAM file version");
         }
-        StaticSAMCore sam(n_predicts, alpha, k, use_gsam, use_small_dict);
+        if (!map_type.empty()) {
+            map_kind = transition_map_kind_from_name(map_type, true);
+            lazy_threshold = lazy_threshold_override;
+        } else if (!saw_map_kind) {
+            map_kind = use_small_dict ? TransitionMapKind::kLazy : TransitionMapKind::kUnordered;
+        }
+        StaticSAMCore sam(
+            n_predicts,
+            alpha,
+            k,
+            use_gsam,
+            map_kind == TransitionMapKind::kLazy,
+            transition_map_kind_name(map_kind),
+            lazy_threshold);
         sam.input_ids_ = std::move(input_ids);
         sam.boundary_end_ = std::move(boundary_end);
         sam.states_.clear();
@@ -722,7 +1145,14 @@ public:
             sam.decode_state(encoded);
         }
         sam.reset_cursor();
-        py::print("GSAMD static SAM config: use_gsam=", sam.use_gsam_, ", use_small_dict=", sam.use_small_dict_, py::arg("sep") = "");
+        py::print(
+            "GSAMD static SAM config: use_gsam=",
+            sam.use_gsam_,
+            ", map_type=",
+            sam.map_type(),
+            ", lazy_threshold=",
+            sam.lazy_threshold_,
+            py::arg("sep") = "");
         return sam;
     }
 
@@ -741,11 +1171,25 @@ private:
         proto::write_int(out, 2, state.length);
         proto::write_int(out, 3, state.cnt_endpos);
         proto::write_int(out, 4, state.min_endpos);
-        for (const auto& edge : state.next.items()) {
+        auto edges = state.next->items();
+        std::sort(edges.begin(), edges.end());
+        for (const auto& edge : edges) {
             proto::write_message(out, 5, encode_edge(edge.first, edge.second));
         }
         if (index < static_cast<i64>(states_topk_next_.size())) {
-            for (const auto& edge : states_topk_next_[static_cast<std::size_t>(index)]) {
+            auto topk_edges = states_topk_next_[static_cast<std::size_t>(index)];
+            std::sort(topk_edges.begin(), topk_edges.end(), [this](const auto& lhs, const auto& rhs) {
+                i64 lhs_count = states_[lhs.second].cnt_endpos;
+                i64 rhs_count = states_[rhs.second].cnt_endpos;
+                if (lhs_count != rhs_count) {
+                    return lhs_count > rhs_count;
+                }
+                if (lhs.first != rhs.first) {
+                    return lhs.first < rhs.first;
+                }
+                return lhs.second < rhs.second;
+            });
+            for (const auto& edge : topk_edges) {
                 proto::write_message(out, 6, encode_edge(edge.first, edge.second));
             }
         }
@@ -772,7 +1216,7 @@ private:
     }
 
     void decode_state(const std::string& data) {
-        State state(use_small_dict_);
+        State state(map_kind_, lazy_threshold_);
         std::vector<std::pair<i64, i64>> topk;
         std::size_t pos = 0;
         while (pos < data.size()) {
@@ -795,7 +1239,7 @@ private:
                 auto edge = decode_edge(data.substr(pos, static_cast<std::size_t>(len)));
                 pos += static_cast<std::size_t>(len);
                 if (field == 5) {
-                    state.next.set(edge.first, edge.second);
+                    state.next->set(edge.first, edge.second);
                 } else {
                     topk.push_back(edge);
                 }
@@ -819,11 +1263,13 @@ PYBIND11_MODULE(_gsamd_core, m) {
         .def_readonly("ratio", &EdgeStats::ratio);
 
     py::class_<DynSAMCore>(m, "DynSAMCore")
-        .def(py::init<i64, double, bool, bool>(),
+        .def(py::init<i64, double, bool, bool, const std::string&, i64>(),
              py::arg("n_predicts") = 40,
              py::arg("alpha") = 4.0,
              py::arg("use_gsam") = true,
-             py::arg("use_small_dict") = true)
+             py::arg("use_small_dict") = true,
+             py::arg("map_type") = "",
+             py::arg("lazy_threshold") = 1)
         .def("reset", &DynSAMCore::reset)
         .def("add_tokens", &DynSAMCore::add_tokens)
         .def("transfer_tokens", &DynSAMCore::transfer_tokens)
@@ -832,17 +1278,22 @@ PYBIND11_MODULE(_gsamd_core, m) {
         .def("gen_dyn_draft", &DynSAMCore::gen_dyn_draft)
         .def("state_count", &DynSAMCore::state_count)
         .def("edge_stats", &DynSAMCore::edge_stats)
+        .def("transition_memory_usage", &DynSAMCore::transition_memory_usage)
         .def_property("n_predicts", &DynSAMCore::n_predicts, &DynSAMCore::set_n_predicts)
         .def_property_readonly("use_gsam", &DynSAMCore::use_gsam)
-        .def_property_readonly("use_small_dict", &DynSAMCore::use_small_dict);
+        .def_property_readonly("use_small_dict", &DynSAMCore::use_small_dict)
+        .def_property_readonly("map_type", &DynSAMCore::map_type)
+        .def_property_readonly("lazy_threshold", &DynSAMCore::lazy_threshold);
 
     py::class_<StaticSAMCore>(m, "StaticSAMCore")
-        .def(py::init<i64, double, i64, bool, bool>(),
+        .def(py::init<i64, double, i64, bool, bool, const std::string&, i64>(),
              py::arg("n_predicts") = 40,
              py::arg("alpha") = 4.0,
              py::arg("K") = 8,
              py::arg("use_gsam") = true,
-             py::arg("use_small_dict") = true)
+             py::arg("use_small_dict") = true,
+             py::arg("map_type") = "",
+             py::arg("lazy_threshold") = 1)
         .def("add_batch_tokens", &StaticSAMCore::add_batch_tokens,
              py::arg("batch_tokens"),
              py::arg("eos_token"),
@@ -854,10 +1305,18 @@ PYBIND11_MODULE(_gsamd_core, m) {
         .def("gen_draft", &StaticSAMCore::gen_draft)
         .def("gen_dyn_draft", &StaticSAMCore::gen_dyn_draft)
         .def("save", &StaticSAMCore::save)
-        .def_static("load", &StaticSAMCore::load)
+        .def_static(
+            "load",
+            &StaticSAMCore::load,
+            py::arg("path"),
+            py::arg("map_type") = "",
+            py::arg("lazy_threshold") = 1)
         .def("state_count", &StaticSAMCore::state_count)
         .def("edge_stats", &StaticSAMCore::edge_stats)
+        .def("transition_memory_usage", &StaticSAMCore::transition_memory_usage)
         .def_property("n_predicts", &StaticSAMCore::n_predicts, &StaticSAMCore::set_n_predicts)
         .def_property_readonly("use_gsam", &StaticSAMCore::use_gsam)
-        .def_property_readonly("use_small_dict", &StaticSAMCore::use_small_dict);
+        .def_property_readonly("use_small_dict", &StaticSAMCore::use_small_dict)
+        .def_property_readonly("map_type", &StaticSAMCore::map_type)
+        .def_property_readonly("lazy_threshold", &StaticSAMCore::lazy_threshold);
 }

@@ -4,40 +4,20 @@ Usage:
 python3 gen_model_answer.py --model-path lmsys/fastchat-t5-3b-v1.0 --model-id fastchat-t5-3b-v1.0
 """
 import argparse
-
-import torch
 from fastchat.utils import str_to_torch_dtype
+
+from evaluation.eval import run_eval, reorg_answer_file
+
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from evaluation.eval import reorg_answer_file, run_eval
 
-
-def resolve_device(device_name: str) -> torch.device:
-    if device_name == "auto":
-        if torch.cuda.is_available():
-            return torch.device("cuda")
-        if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-            return torch.device("mps")
-        return torch.device("cpu")
-    return torch.device(device_name)
-
-
-def resolve_dtype(dtype_name: str | None, device: torch.device) -> str:
-    if dtype_name is not None:
-        return dtype_name
-    if device.type == "cuda":
-        return "float16"
-    return "float32"
-
-
-def baseline_forward(inputs, model, tokenizer, max_new_tokens, temperature=0.0, do_sample=False, use_cache=True):
+def baseline_forward(inputs, model, tokenizer, max_new_tokens, temperature=0.0, do_sample=False):
     input_ids = inputs.input_ids
     output_ids = model.generate(
         input_ids,
         do_sample=do_sample,
         temperature=temperature,
         max_new_tokens=max_new_tokens,
-        use_cache=use_cache,
     )
     new_token = len(output_ids[0][len(input_ids[0]):])
     step = new_token
@@ -100,15 +80,9 @@ if __name__ == "__main__":
     parser.add_argument(
         "--dtype",
         type=str,
-        default=None,
+        default="float16",
         choices=["float32", "float64", "float16", "bfloat16"],
-        help="Override the dtype. Defaults to float16 on CUDA and float32 elsewhere.",
-    )
-    parser.add_argument(
-        "--device",
-        type=str,
-        default="auto",
-        choices=["auto", "cpu", "cuda", "mps"],
+        help="Override the default dtype. If not set, it will use float16 on GPU.",
     )
 
     args = parser.parse_args()
@@ -122,31 +96,19 @@ if __name__ == "__main__":
 
     print(f"Output to {answer_file}")
 
-    device = resolve_device(args.device)
-    dtype_name = resolve_dtype(args.dtype, device)
-    print(f"Loading model on {device} with dtype {dtype_name}")
-
-    model_kwargs = dict(
-        torch_dtype=str_to_torch_dtype(dtype_name),
+    model = AutoModelForCausalLM.from_pretrained(
+        args.model_path,
+        torch_dtype=str_to_torch_dtype(args.dtype),
         low_cpu_mem_usage=True,
+        device_map="auto"
     )
-    if device.type == "cuda" and args.num_gpus_total > 1:
-        model = AutoModelForCausalLM.from_pretrained(
-            args.model_path,
-            device_map="auto",
-            **model_kwargs,
-        )
-    else:
-        model = AutoModelForCausalLM.from_pretrained(
-            args.model_path,
-            **model_kwargs,
-        )
-        model.to(device)
 
     tokenizer = AutoTokenizer.from_pretrained(args.model_path)
-    runtime_device = next(model.parameters()).device
-    do_sample = args.temperature > 0
-    use_cache = runtime_device.type != "mps"
+
+    if args.temperature > 0:
+        do_sample = True
+    else:
+        do_sample = False
 
     run_eval(
         model=model,
@@ -163,9 +125,6 @@ if __name__ == "__main__":
         num_gpus_total=args.num_gpus_total,
         temperature=args.temperature,
         do_sample=do_sample,
-        use_cache=use_cache,
-        clear_cache_after_question=runtime_device.type == "mps",
-        device=str(runtime_device),
     )
 
     reorg_answer_file(answer_file)

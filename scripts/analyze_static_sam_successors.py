@@ -230,11 +230,14 @@ def plot_pie(
 
     fig, ax = plt.subplots(figsize=(14.5, 8.2), dpi=dpi)
     colors = plt.get_cmap("tab20").colors[: len(values)]
+    explode = [0.1] + [0] * top_n
     wedges, _ = ax.pie(
         values,
         labels=None,
+        shadow=True,
         colors=colors,
         startangle=90,
+        explode=explode,
         counterclock=False,
         wedgeprops={"linewidth": 1.2, "edgecolor": "white"},
     )
@@ -354,7 +357,7 @@ def main() -> None:
     if not input_path.exists():
         raise FileNotFoundError(f"protobuf file not found: {input_path}")
     output_path = args.output or DEFAULT_OUTPUT_DIR / (
-        f"{input_path.stem}_successor_distribution.png"
+        f"{input_path.stem}_successor_distribution.pdf"
     )
 
     counts = analyze(input_path, args.edge_field, args.count_mode)

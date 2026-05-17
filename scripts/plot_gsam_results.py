@@ -19,7 +19,7 @@ METHOD_LABELS = {
     "pld": "PLD",
     "cacheback": "CacheBack",
     "samd-small": "SAM Decoding\nSmall Dict",
-    "gsamd-small": "GSAM Decoding",
+    "gsamd-small": "Compact SAM Decoding",
     "samd-origin": "SAM Decoding",
     "gsamd-normal": "GSAM On\nSmall Dict Off",
     "samd-normal": "GSAM Off\nSmall Dict Off",
@@ -349,8 +349,8 @@ def main() -> None:
     args = parse_args()
     extract_overall_csv(args.result, args.csv)
     rows = read_overall_csv(args.csv)
-    memory_speed_output = args.output_dir / "gsam_memory_speed.png"
-    ablation_output = args.output_dir / "gsam_memory_ablation.png"
+    memory_speed_output = args.output_dir / "memory_speed.pdf"
+    ablation_output = args.output_dir / "memory_ablation.pdf"
 
     plot_memory_speed(rows, memory_speed_output, args.dpi)
     plot_memory_ablation(rows, ablation_output, args.dpi)

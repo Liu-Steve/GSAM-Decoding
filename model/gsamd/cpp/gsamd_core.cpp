@@ -180,6 +180,10 @@ private:
 template <std::size_t InlineCapacity>
 class LazyTransitionMap final : public TransitionMap {
 public:
+    LazyTransitionMap() {
+        keys_.fill(kEmptyKey);
+    }
+
     bool contains(i64 key) const {
         return get(key) != -1;
     }
@@ -193,7 +197,7 @@ public:
             }
             return it->second;
         }
-        for (std::uint8_t i = 0; i < size_; ++i) {
+        for (std::size_t i = 0; i < InlineCapacity; ++i) {
             if (keys_[i] == k) {
                 return values_[i];
             }
@@ -208,29 +212,38 @@ public:
             (*map_)[k] = v;
             return;
         }
-        for (std::uint8_t i = 0; i < size_; ++i) {
+        for (std::size_t i = 0; i < InlineCapacity; ++i) {
             if (keys_[i] == k) {
                 values_[i] = v;
                 return;
             }
         }
-        if (size_ < InlineCapacity) {
-            keys_[size_] = k;
-            values_[size_] = v;
-            ++size_;
-            return;
+        for (std::size_t i = 0; i < InlineCapacity; ++i) {
+            if (keys_[i] == kEmptyKey) {
+                keys_[i] = k;
+                values_[i] = v;
+                return;
+            }
         }
         map_ = std::make_unique<std::unordered_map<i32, i32>>();
         map_->reserve(InlineCapacity + 1);
-        for (std::uint8_t i = 0; i < size_; ++i) {
-            (*map_)[keys_[i]] = values_[i];
+        for (std::size_t i = 0; i < InlineCapacity; ++i) {
+            if (keys_[i] != kEmptyKey) {
+                (*map_)[keys_[i]] = values_[i];
+            }
         }
         (*map_)[k] = v;
-        size_ = 0;
     }
 
     std::size_t size() const {
-        return map_ ? map_->size() : size_;
+        if (map_) {
+            return map_->size();
+        }
+        std::size_t count = 0;
+        for (std::size_t i = 0; i < InlineCapacity; ++i) {
+            count += keys_[i] != kEmptyKey ? 1 : 0;
+        }
+        return count;
     }
 
     std::vector<std::pair<i64, i64>> items() const {
@@ -242,8 +255,10 @@ public:
             }
             return out;
         }
-        for (std::uint8_t i = 0; i < size_; ++i) {
-            out.emplace_back(keys_[i], values_[i]);
+        for (std::size_t i = 0; i < InlineCapacity; ++i) {
+            if (keys_[i] != kEmptyKey) {
+                out.emplace_back(keys_[i], values_[i]);
+            }
         }
         return out;
     }
@@ -260,7 +275,6 @@ public:
 
     std::unique_ptr<TransitionMap> clone() const {
         auto copy = std::make_unique<LazyTransitionMap<InlineCapacity>>();
-        copy->size_ = size_;
         copy->keys_ = keys_;
         copy->values_ = values_;
         if (map_) {
@@ -270,15 +284,19 @@ public:
     }
 
 private:
+    static constexpr i32 kEmptyKey = -1;
     std::array<i32, InlineCapacity> keys_{};
     std::array<i32, InlineCapacity> values_{};
-    std::uint8_t size_ = 0;
     std::unique_ptr<std::unordered_map<i32, i32>> map_;
 };
 
 template <std::size_t InlineCapacity>
 class LazyInt32TransitionMap final : public TransitionMap {
 public:
+    LazyInt32TransitionMap() {
+        keys_.fill(kEmptyKey);
+    }
+
     bool contains(i64 key) const {
         return get(key) != -1;
     }
@@ -292,7 +310,7 @@ public:
             }
             return it->second;
         }
-        for (std::uint8_t i = 0; i < size_; ++i) {
+        for (std::size_t i = 0; i < InlineCapacity; ++i) {
             if (keys_[i] == k) {
                 return values_[i];
             }
@@ -307,28 +325,37 @@ public:
             (*map_)[k] = v;
             return;
         }
-        for (std::uint8_t i = 0; i < size_; ++i) {
+        for (std::size_t i = 0; i < InlineCapacity; ++i) {
             if (keys_[i] == k) {
                 values_[i] = v;
                 return;
             }
         }
-        if (size_ < InlineCapacity) {
-            keys_[size_] = k;
-            values_[size_] = v;
-            ++size_;
-            return;
+        for (std::size_t i = 0; i < InlineCapacity; ++i) {
+            if (keys_[i] == kEmptyKey) {
+                keys_[i] = k;
+                values_[i] = v;
+                return;
+            }
         }
         map_ = std::make_unique<Int32Map<i32>>();
-        for (std::uint8_t i = 0; i < size_; ++i) {
-            (*map_)[keys_[i]] = values_[i];
+        for (std::size_t i = 0; i < InlineCapacity; ++i) {
+            if (keys_[i] != kEmptyKey) {
+                (*map_)[keys_[i]] = values_[i];
+            }
         }
         (*map_)[k] = v;
-        size_ = 0;
     }
 
     std::size_t size() const {
-        return map_ ? map_->size() : size_;
+        if (map_) {
+            return map_->size();
+        }
+        std::size_t count = 0;
+        for (std::size_t i = 0; i < InlineCapacity; ++i) {
+            count += keys_[i] != kEmptyKey ? 1 : 0;
+        }
+        return count;
     }
 
     std::vector<std::pair<i64, i64>> items() const {
@@ -340,8 +367,10 @@ public:
             }
             return out;
         }
-        for (std::uint8_t i = 0; i < size_; ++i) {
-            out.emplace_back(keys_[i], values_[i]);
+        for (std::size_t i = 0; i < InlineCapacity; ++i) {
+            if (keys_[i] != kEmptyKey) {
+                out.emplace_back(keys_[i], values_[i]);
+            }
         }
         return out;
     }
@@ -356,7 +385,6 @@ public:
 
     std::unique_ptr<TransitionMap> clone() const {
         auto copy = std::make_unique<LazyInt32TransitionMap<InlineCapacity>>();
-        copy->size_ = size_;
         copy->keys_ = keys_;
         copy->values_ = values_;
         if (map_) {
@@ -369,9 +397,9 @@ public:
     }
 
 private:
+    static constexpr i32 kEmptyKey = -1;
     std::array<i32, InlineCapacity> keys_{};
     std::array<i32, InlineCapacity> values_{};
-    std::uint8_t size_ = 0;
     std::unique_ptr<Int32Map<i32>> map_;
 };
 

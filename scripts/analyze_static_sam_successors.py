@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Iterable
 
 
-DEFAULT_INPUT = Path("local_cache/static_data_sam_normal_dict.pb")
+DEFAULT_INPUT = Path("local_cache/gsamd/static_data_sam.pb")
 DEFAULT_OUTPUT_DIR = Path("assets")
 
 WIRE_VARINT = 0
@@ -29,7 +29,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Analyze the distribution of successor counts for states stored in "
-            "local_cache/static_data_*.pb and plot a pie chart."
+            "local_cache/gsamd/static_data_*.pb and plot a pie chart."
         )
     )
     parser.add_argument(
@@ -44,7 +44,7 @@ def parse_args() -> argparse.Namespace:
         "--output",
         type=Path,
         default=None,
-        help="output chart path (default: assets/<input_stem>_successor_distribution.png)",
+        help="output chart path (default: assets/<input_stem>_successor_distribution.pdf)",
     )
     parser.add_argument(
         "--edge-field",
@@ -222,9 +222,9 @@ def plot_pie(
 
     plt.rcParams.update(
         {
-            "font.size": 17,
-            "axes.titlesize": 24,
-            "figure.titlesize": 26,
+            "font.size": 28,
+            "axes.titlesize": 28,
+            "figure.titlesize": 28,
         }
     )
 
@@ -295,7 +295,7 @@ def plot_pie(
 
     for item in label_items:
         side = item["side"]
-        label_x = side * 1.72
+        label_x = side * 1.4
         anchor_x = item["x"] * 0.92
         anchor_y = item["y"] * 0.92
         text_edge_x = label_x - side * 0.04
@@ -316,11 +316,11 @@ def plot_pie(
             item["text"],
             ha="left" if side > 0 else "right",
             va="center",
-            fontsize=23,
+            fontsize=28,
             clip_on=False,
         )
 
-    fig.suptitle(title, x=0.5, y=0.97, ha="center", fontsize=26)
+    fig.suptitle(title, x=0.5, y=0.97, ha="center", fontsize=32)
     ax.axis("equal")
     ax.set_xlim(-3.05, 3.05)
     ax.set_ylim(-1.38, 1.38)

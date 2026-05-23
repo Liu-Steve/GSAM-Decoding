@@ -12,3 +12,4 @@ build/
 .clangd
 sam_data
 *.log
+spec_bench_*/

@@ -154,12 +154,18 @@ def summarize_runs(paths: list[Path]) -> pd.DataFrame:
     return pd.concat([mean, std], axis=1).reset_index()
 
 
-def make_table(tabular: str, caption: str, label: str, starred: bool = False) -> str:
+def make_table(
+    tabular: str,
+    caption: str,
+    label: str,
+    starred: bool = False,
+    size: str = "\\small",
+) -> str:
     env = "table*" if starred else "table"
     return (
         f"\\begin{{{env}}}[t]\n"
         "\\centering\n"
-        "\\small\n"
+        f"{size}\n"
         f"{tabular}\n"
         f"\\caption{{{caption}}}\n"
         f"\\label{{{label}}}\n"
@@ -258,7 +264,7 @@ def generate_ablation_table(summary: pd.DataFrame) -> None:
     rows.extend(["\\bottomrule", "\\end{tabular}", "}"])
     table = make_table(
         "\n".join(rows),
-        "Ablation of construction and transition-container choices. STL denotes the C++ standard-library hash table, and OA denotes the Open Addressing hash table used by SuffixDecoding. Overall speedup is reported as the 3-run mean $\\pm$ standard deviation; accepted length is reported as the 3-run mean.",
+        "Ablation of construction and transition-container choices. STL denotes the standard-library hash table in our systems-level implementation, and OA denotes the Open Addressing hash table used by SuffixDecoding. Overall speedup is reported as the 3-run mean $\\pm$ standard deviation; accepted length is reported as the 3-run mean.",
         "tab:ablation",
         starred=True,
     )
@@ -292,7 +298,7 @@ def generate_13b_table(summary_13b: pd.DataFrame) -> None:
     samd = row_for(summary_13b, "samd-origin")
     csamd = row_for(summary_13b, "csam-gsamd-lazy_int32-t1")
     rows = [
-        "\\resizebox{\\columnwidth}{!}{%",
+        "\\resizebox{0.8\\columnwidth}{!}{%",
         "\\begin{tabular}{lrr}",
         "\\toprule",
         "Metric & SAMD & C-SAMD \\\\",
@@ -308,6 +314,7 @@ def generate_13b_table(summary_13b: pd.DataFrame) -> None:
         "\n".join(rows),
         "Vicuna-13B-v1.3 results for SAMD and C-SAMD. The experiment is run once; speedup and accepted length are reported without standard deviations.",
         "tab:vicuna13b-results",
+        size="\\scriptsize\n\\setlength{\\tabcolsep}{3pt}\n\\renewcommand{\\arraystretch}{0.9}",
     )
     write_text(GENERATED_DIR / "vicuna13b_results.tex", table)
 
@@ -452,7 +459,7 @@ def plot_memory_speed(summary: pd.DataFrame, output: Path, dpi: int, title: str 
     memories = [bytes_to_gb(row_for(summary, name)["memory_mean"]) for name in methods]
     speeds = [row_for(summary, name)["overall_mean"] for name in methods]
     ax.set_ylabel("Overall Speedup", fontsize=16)
-    ax.set_xlabel("CPU RSS (GB)", fontsize=16)
+    ax.set_xlabel("Host Memory (GB)", fontsize=16)
     ax.set_title(title, pad=10, fontsize=17)
     ax.set_xscale("log")
     ax.set_xlim(min(memories) * 0.82, max(memories) * 1.12)
@@ -599,7 +606,7 @@ def plot_memory_ablation(summary: pd.DataFrame, output: Path, dpi: int) -> None:
     ax.set_xticks(range(len(labels)))
     ax.set_xticklabels(labels, fontsize=13)
     ax.tick_params(axis="y", labelsize=14)
-    ax.set_ylabel("CPU RSS (GB)", fontsize=16)
+    ax.set_ylabel("Host Memory (GB)", fontsize=16)
     ax.set_title("Index Memory Ablation", pad=10, fontsize=20)
     ax.set_ylim(0, max(values) * 1.18)
     ax.grid(True, axis="y", linestyle="--", linewidth=0.7, alpha=0.35)
@@ -632,7 +639,7 @@ def plot_lazy_threshold(summary: pd.DataFrame, output: Path, dpi: int) -> None:
         ax.fill_between(thresholds, memories - memory_stds, memories + memory_stds, color=color, alpha=0.18, linewidth=0)
 
     ax.set_xlabel("Lazy Inline Threshold $\tau$", fontsize=16)
-    ax.set_ylabel("CPU RSS (GB)", fontsize=16)
+    ax.set_ylabel("Host Memory (GB)", fontsize=16)
     ax.set_title("Memory by Lazy Inline Threshold", pad=10, fontsize=20)
     ax.set_xticks(thresholds)
     ax.tick_params(axis="both", labelsize=13)

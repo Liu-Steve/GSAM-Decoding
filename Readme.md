@@ -1,4 +1,26 @@
 <div align="center">
+  <h2>Compact SAM Decoding (C-SAMD): Space-Efficient Suffix Automata for Retrieval-Based Speculative Decoding</h2> 
+</div>
+
+This branch contains the implementation of C-SAMD.
+C-SAMD optimizes the space usage of SAM Decoding, achieving over 80% space savings, with comparable speedup ratio.
+Our code comes from the CacheBack fork of Spec-Bench, on which we implemented C-SAMD.
+
+<img src="assets/retrieval_memory_speed_tradeoff.png"/>
+
+You need to install the standard C++ compiler toolchain, pybind version 3.0.1, and protobuf version 3.19.0 to ensure the code compiles correctly.
+Our code works fine on Python 3.12.12. For more detailed requirements, please refer to `requirements.txt`.
+Before run experiment, run `python model/gsamd/setup.py build_ext --inplace` to build library of gsam.
+
+To use the static suffix automaton properly, you will also need a corpus. You can build it from scratch according to the implementation in the [SAM-Decoding](https://github.com/hyx1999/SAM-Decoding) repository, or you can choose to download the pre-built corpus provided by them.
+You can then use the script in `model/gsamd/tools` to build the corpus into a .pb file.
+
+For preparations for other methods, please refer to the following text.
+To reproduce the experiments described in this article, please refer to `eval_7b.sh` and `eval_13b.sh`.
+
+Below is the original README from the upstream CacheBack repository.
+
+<div align="center">
   <h2>Cacheback Decoding Implementation for Spec-Bench</h2> 
 </div>
 

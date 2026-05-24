@@ -13,3 +13,4 @@ build/
 sam_data
 *.log
 spec_bench_*/
+generated/

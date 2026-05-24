@@ -32,7 +32,7 @@ METHOD_LABELS = {
     "rest-temperature-0.0-top_p-0": "REST",
     "recycling": "Recycling",
     "pld-float16": "PLD",
-    "cacheback": "CacheBack",
+    "cacheback": "Cacheback",
     "samd-origin": "SAMD",
     "csam-gsamd-lazy_int32-t1": "C-SAMD",
     "samd-eagle2": "SAMD + EAGLE-2",

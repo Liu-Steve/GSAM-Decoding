@@ -638,7 +638,7 @@ def plot_lazy_threshold(summary: pd.DataFrame, output: Path, dpi: int) -> None:
         ax.plot(thresholds, memories, marker=marker, markersize=marker_size, linewidth=2.4, color=color, label=label)
         ax.fill_between(thresholds, memories - memory_stds, memories + memory_stds, color=color, alpha=0.18, linewidth=0)
 
-    ax.set_xlabel("Lazy Inline Threshold $\tau$", fontsize=16)
+    ax.set_xlabel("Lazy Inline Threshold", fontsize=16)
     ax.set_ylabel("Host Memory (GB)", fontsize=16)
     ax.set_title("Memory by Lazy Inline Threshold", pad=10, fontsize=20)
     ax.set_xticks(thresholds)

@@ -296,8 +296,6 @@ def degree_row(stats: pd.DataFrame, construction: str, corpus_percent: int) -> p
 
 def compact_uncertainty_cell(mean: float, std: float) -> str:
     std_text = f"{std:.3f}"
-    if std_text.startswith("0"):
-        std_text = std_text[1:]
     return rf"${mean:.3f}{{\pm}}{std_text}$"
 
 
@@ -344,7 +342,7 @@ def generate_corpus_scaling_table(
         f"{backslash}setlength{{{backslash}tabcolsep}}{{2.7pt}}",
         f"{backslash}begin{{tabular}}{{rrrrr}}",
         f"{backslash}toprule",
-        f"Corpus & Memory & Speedup & Accept & Degree 1 {row_end}",
+        f"Corpus & RSS (GB) & Speedup & Accepted & Degree 1 {row_end}",
         f"{backslash}midrule",
     ]
     for percentage in CORPUS_PERCENTAGES:
@@ -368,7 +366,7 @@ def generate_corpus_scaling_table(
     )
     table = make_table(
         "\n".join(rows),
-        "C-SAMD corpus scaling (three runs). Memory is GB; Accept is accepted draft length; Degree 1 is the fraction of single-successor states.",
+        "C-SAMD corpus scaling (three runs). RSS is full-process host memory; Accepted is the accepted draft length; Degree 1 is the fraction of single-successor states.",
         "tab:corpus-scaling",
     )
     write_text(GENERATED_DIR / "corpus_scaling.tex", table)
@@ -379,7 +377,7 @@ def generate_main_table(summary: pd.DataFrame) -> None:
         "\\resizebox{\\columnwidth}{!}{%",
         "\\begin{tabular}{lrrr}",
         "\\toprule",
-        "Method & Memory (GB) & Overall Speedup & Accept Length \\\\",
+        "Method & Host RSS (GB) & Overall Speedup & Accepted Length \\\\",
         "\\midrule",
     ]
     for name in MAIN_METHODS:
@@ -398,7 +396,7 @@ def generate_main_table(summary: pd.DataFrame) -> None:
     rows.extend(["\\bottomrule", "\\end{tabular}", "}"])
     table = make_table(
         "\n".join(rows),
-        "Memory, overall speedup, and accepted draft length of retrieval-based speculative decoding methods. The dynamic-only row uses no external corpus. Speedup is reported as the 3-run mean $\\pm$ standard deviation; accepted length is the mean number of accepted tokens per verification step.",
+        "Overall Spec-Bench results. RSS is full-process host memory; the dynamic-only row uses no external corpus. Speedup is the three-run mean $\\pm$ standard deviation, and accepted length is the overall mean per verification step.",
         "tab:main-results",
     )
     write_text(GENERATED_DIR / "main_results.tex", table)
@@ -409,7 +407,7 @@ def generate_task_table(summary: pd.DataFrame) -> None:
         "\\resizebox{\\columnwidth}{!}{%",
         "\\begin{tabular}{lrrr}",
         "\\toprule",
-        "Method & Memory (GB) & Overall Speedup & Accept Length \\\\",
+        "Method & Host RSS (GB) & Overall Speedup & Accepted Length \\\\",
         "\\midrule",
     ]
     for name in MAIN_METHODS:
@@ -423,7 +421,7 @@ def generate_task_table(summary: pd.DataFrame) -> None:
     rows.extend(["\\bottomrule", "\\end{tabular}", "}"])
     table = make_table(
         "\n".join(rows),
-        "Spec-Bench overall results for retrieval-based speculative decoding methods. The dynamic-only row uses no external corpus. Speedup is reported as the 3-run mean $\\pm$ standard deviation; accepted length is the overall mean number of accepted tokens per verification step.",
+        "Overall Spec-Bench results. RSS is full-process host memory; the dynamic-only row uses no external corpus. Speedup is the three-run mean $\\pm$ standard deviation, and accepted length is the overall mean per verification step.",
         "tab:task-results",
     )
     write_text(GENERATED_DIR / "task_results.tex", table)
@@ -446,7 +444,7 @@ def generate_ablation_table(summary: pd.DataFrame) -> None:
     rows = [
         f"{backslash}begin{{tabular}}{{lllcrrr}}",
         f"{backslash}toprule",
-        f"Variant & Construction & Transition container & {tau_label} & Memory (GB) & Overall speedup & Accept length {row_end}",
+        f"Variant & Construction & Transition container & {tau_label} & Host RSS (GB) & Overall speedup & Accepted length {row_end}",
         f"{backslash}midrule",
     ]
     for name in ABLATION_METHODS:
@@ -472,7 +470,7 @@ def generate_ablation_table(summary: pd.DataFrame) -> None:
     size = f"{backslash}small\n{backslash}setlength{{{backslash}tabcolsep}}{{4.2pt}}"
     table = make_table(
         "\n".join(rows),
-        "Full ablation of construction and transition-container choices. STL is the standard-library hash table in the common C++ core; OA is the Open Addressing table used by SuffixDecoding. Speedup is the three-run mean $" + backslash + "pm$ standard deviation and accept length is the three-run mean.",
+        "Full ablation of construction and transition-container choices. STL is the standard-library hash table in the common C++ core; OA is adapted from ArcticInference. Speedup is the three-run mean $" + backslash + "pm$ standard deviation, and accepted length is the three-run mean.",
         "tab:ablation",
         starred=True,
         size=size,
@@ -483,26 +481,44 @@ def generate_ablation_table(summary: pd.DataFrame) -> None:
 def generate_eagle_table(eagle: pd.DataFrame) -> None:
     samd = row_for(eagle, "samd-eagle2")
     csamd = row_for(eagle, "gsamd-eagle2")
+    backslash = chr(92)
+    row_end = backslash * 2
     rows = [
-        "\\resizebox{\\columnwidth}{!}{%",
-        "\\begin{tabular}{lrr}",
-        "\\toprule",
-        "Metric & SAMD + EAGLE-2 & C-SAMD + EAGLE-2 \\\\",
-        "\\midrule",
-        f"Memory (GB) & {bytes_to_gb(samd['memory_mean']):.2f} & {bytes_to_gb(csamd['memory_mean']):.2f} \\\\",
-        f"Overall Speedup & {speed_cell(samd)} & {speed_cell(csamd)} \\\\",
-        f"Accept Length & {samd['accept_overall_mean']:.3f} & {csamd['accept_overall_mean']:.3f} \\\\",
-        "\\bottomrule",
-        "\\end{tabular}",
-        "}",
+        f"{backslash}begin{{tabular}}{{lrr}}",
+        f"{backslash}toprule",
+        f"Task & SAMD + EAGLE-2 & C-SAMD + EAGLE-2 {row_end}",
+        f"{backslash}midrule",
     ]
+    task_labels = [
+        ("mt_bench", "MT-Bench"),
+        ("translation", "Translation"),
+        ("summarization", "Summarization"),
+        ("qa", "QA"),
+        ("math_reasoning", "Math"),
+        ("rag", "RAG"),
+    ]
+    for key, label in task_labels:
+        samd_speed = compact_uncertainty_cell(
+            samd[f"{key}_mean"], samd[f"{key}_std"]
+        )
+        csamd_speed = compact_uncertainty_cell(
+            csamd[f"{key}_mean"], csamd[f"{key}_std"]
+        )
+        rows.append(f"{label} & {samd_speed} & {csamd_speed} {row_end}")
+    rows.extend([f"{backslash}bottomrule", f"{backslash}end{{tabular}}"])
+    size = "\n".join(
+        [
+            f"{backslash}scriptsize",
+            f"{backslash}setlength{{{backslash}tabcolsep}}{{4pt}}",
+        ]
+    )
     table = make_table(
         "\n".join(rows),
-        "SAMD variants mixed with EAGLE-2. Speedup is the 3-run mean $\\pm$ standard deviation; accepted length is shown as a table value because its variance is negligible.",
+        "Task-level speedups for the EAGLE-2 hybrids, reported as three-run means $\\pm$ standard deviations. Aggregate RSS, speedup, and accepted length appear in the text.",
         "tab:eagle2-mix",
+        size=size,
     )
     write_text(GENERATED_DIR / "eagle2_mix_results.tex", table)
-
 
 def generate_13b_table(summary_13b: pd.DataFrame) -> None:
     samd = row_for(summary_13b, "samd-origin")
@@ -513,9 +529,9 @@ def generate_13b_table(summary_13b: pd.DataFrame) -> None:
         "\\toprule",
         "Metric & SAMD & C-SAMD \\\\",
         "\\midrule",
-        f"Memory (GB) & {bytes_to_gb(samd['memory_mean']):.2f} & {bytes_to_gb(csamd['memory_mean']):.2f} \\\\",
+        f"Host RSS (GB) & {bytes_to_gb(samd['memory_mean']):.2f} & {bytes_to_gb(csamd['memory_mean']):.2f} \\\\",
         f"Overall Speedup & {plain_speed(samd)} & {plain_speed(csamd)} \\\\",
-        f"Accept Length & {samd['accept_overall_mean']:.3f} & {csamd['accept_overall_mean']:.3f} \\\\",
+        f"Accepted Length & {samd['accept_overall_mean']:.3f} & {csamd['accept_overall_mean']:.3f} \\\\",
         "\\bottomrule",
         "\\end{tabular}",
         "}",
@@ -591,7 +607,7 @@ def generate_lazy_threshold_speedup_table(summary: pd.DataFrame) -> None:
     rows.extend(["\\bottomrule", "\\end{tabular}", "}"])
     table = make_table(
         "\n".join(rows),
-        "Overall speedup for different lazy inline thresholds. Values are reported as 3-run mean $\\pm$ standard deviation.",
+        "Overall speedup for different lazy inline thresholds. Values are reported as the three-run mean $\\pm$ standard deviation.",
         "tab:lazy-threshold-speedup",
         starred=False,
     )

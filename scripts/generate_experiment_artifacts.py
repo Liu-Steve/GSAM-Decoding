@@ -17,6 +17,21 @@ DEFAULT_7B_RESULTS = [
     ROOT / "data" / "spec_bench_7b_3" / "result.csv",
 ]
 DEFAULT_13B_RESULT = ROOT / "data" / "spec_bench_13b" / "result.csv"
+DEFAULT_DYNAMIC_ONLY_RESULTS = [
+    ROOT / "data" / f"spec_bench_7b_percent_{run}" / "result.csv"
+    for run in range(1, 4)
+]
+
+DEFAULT_DEGREE_STATS = ROOT / "data" / "index_degree_stats.csv"
+DEFAULT_DEGREE_INDEXES = {
+    "sam-100": ROOT / "local_cache" / "gsamd" / "static_data_sam.pb",
+    "gsam-1": ROOT / "local_cache" / "gsamd" / "static_data_gsam_1.pb",
+    "gsam-5": ROOT / "local_cache" / "gsamd" / "static_data_gsam_5.pb",
+    "gsam-10": ROOT / "local_cache" / "gsamd" / "static_data_gsam_10.pb",
+    "gsam-50": ROOT / "local_cache" / "gsamd" / "static_data_gsam_50.pb",
+    "gsam-100": ROOT / "local_cache" / "gsamd" / "static_data_gsam.pb",
+}
+CORPUS_PERCENTAGES = (1, 5, 10, 50, 100)
 
 TASKS = [
     ("mt_bench", "MT"),
@@ -33,6 +48,7 @@ METHOD_LABELS = {
     "recycling": "Recycling",
     "pld-float16": "PLD",
     "cacheback": "Cacheback",
+    "csamd-dynamic-only": "C-SAMD (dynamic only)",
     "samd-origin": "SAMD",
     "csam-gsamd-lazy_int32-t1": "C-SAMD",
     "samd-eagle2": "SAMD + EAGLE-2",
@@ -57,9 +73,12 @@ MAIN_METHODS = [
     "recycling",
     "pld-float16",
     "cacheback",
+    "csamd-dynamic-only",
     "samd-origin",
     "csam-gsamd-lazy_int32-t1",
 ]
+
+PLOT_METHODS = [name for name in MAIN_METHODS if name != "csamd-dynamic-only"]
 
 ABLATION_METHODS = [
     "samd-origin",
@@ -173,6 +192,188 @@ def make_table(
     )
 
 
+def resolve_degree_indexes(overrides: list[str]) -> dict[str, Path]:
+    paths = {name: path.resolve() for name, path in DEFAULT_DEGREE_INDEXES.items()}
+    for value in overrides:
+        name, separator, raw_path = value.partition("=")
+        if not separator or name not in paths or not raw_path:
+            expected = ", ".join(paths)
+            raise ValueError(
+                f"invalid --degree-index {value!r}; expected NAME=PATH where NAME is one of: {expected}"
+            )
+        paths[name] = Path(raw_path).expanduser().resolve()
+    return paths
+
+
+def collect_degree_stats(index_paths: dict[str, Path], output: Path) -> pd.DataFrame:
+    from analyze_static_sam_successors import analyze
+
+    rows = []
+    for index_id, path in index_paths.items():
+        if not path.exists():
+            raise FileNotFoundError(path)
+        construction, percentage_text = index_id.split("-", maxsplit=1)
+        print(f"Scanning degree statistics: {index_id} <- {path}")
+        counts = analyze(path, edge_field="edge", count_mode="transitions")
+        total_states = sum(counts.values())
+        if total_states == 0:
+            raise ValueError(f"no states found in {path}")
+        try:
+            source_index = str(path.relative_to(ROOT))
+        except ValueError:
+            source_index = str(path)
+        row = {
+            "construction": construction,
+            "corpus_percent": int(percentage_text),
+            "source_index": source_index,
+            "total_states": total_states,
+        }
+        for degree in range(1, 6):
+            row[f"degree_{degree}_states"] = counts.get(degree, 0)
+        row["degree_other_states"] = total_states - sum(
+            counts.get(degree, 0) for degree in range(1, 6)
+        )
+        rows.append(row)
+
+    frame = pd.DataFrame(rows)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    frame.to_csv(output, index=False)
+    print(f"Wrote degree-stat cache: {output}")
+    return frame
+
+
+def load_degree_stats(path: Path) -> pd.DataFrame:
+    if not path.exists():
+        raise FileNotFoundError(
+            f"degree-stat cache not found: {path}; rerun with --refresh-degree-stats"
+        )
+    frame = pd.read_csv(path)
+    bucket_columns = [f"degree_{degree}_states" for degree in range(1, 6)] + [
+        "degree_other_states"
+    ]
+    required_columns = {
+        "construction",
+        "corpus_percent",
+        "source_index",
+        "total_states",
+        *bucket_columns,
+    }
+    missing = sorted(required_columns - set(frame.columns))
+    if missing:
+        raise ValueError(f"missing degree-stat columns in {path}: {missing}")
+
+    numeric_columns = ["corpus_percent", "total_states", *bucket_columns]
+    frame[numeric_columns] = frame[numeric_columns].apply(pd.to_numeric, errors="raise")
+    expected = {"sam-100", *(f"gsam-{value}" for value in CORPUS_PERCENTAGES)}
+    actual = {
+        f"{row.construction}-{int(row.corpus_percent)}"
+        for row in frame.itertuples(index=False)
+    }
+    if actual != expected:
+        raise ValueError(
+            f"degree-stat rows in {path} are {sorted(actual)}; expected {sorted(expected)}"
+        )
+    for row in frame.itertuples(index=False):
+        bucket_total = sum(getattr(row, column) for column in bucket_columns)
+        if int(bucket_total) != int(row.total_states):
+            raise ValueError(
+                f"degree buckets do not sum to total_states for {row.construction}-{int(row.corpus_percent)}"
+            )
+    return frame
+
+
+def degree_row(stats: pd.DataFrame, construction: str, corpus_percent: int) -> pd.Series:
+    rows = stats.loc[
+        (stats["construction"] == construction)
+        & (stats["corpus_percent"] == corpus_percent)
+    ]
+    if len(rows) != 1:
+        raise KeyError(
+            f"expected one degree-stat row for {construction}-{corpus_percent}, found {len(rows)}"
+        )
+    return rows.iloc[0]
+
+
+def compact_uncertainty_cell(mean: float, std: float) -> str:
+    std_text = f"{std:.3f}"
+    if std_text.startswith("0"):
+        std_text = std_text[1:]
+    return rf"${mean:.3f}{{\pm}}{std_text}$"
+
+
+def generate_degree_distribution_table(stats: pd.DataFrame) -> None:
+    backslash = chr(92)
+    row_end = backslash * 2
+    rows = [
+        f"{backslash}setlength{{{backslash}tabcolsep}}{{4.2pt}}",
+        f"{backslash}begin{{tabular}}{{lrrrrrr}}",
+        f"{backslash}toprule",
+        f"Out-degree & 1 & 2 & 3 & 4 & 5 & Other {row_end}",
+        f"{backslash}midrule",
+    ]
+    for construction, label in (("sam", "SAM"), ("gsam", "GSAM")):
+        row = degree_row(stats, construction, 100)
+        total_states = float(row["total_states"])
+        bucket_columns = [f"degree_{degree}_states" for degree in range(1, 6)] + [
+            "degree_other_states"
+        ]
+        values = [
+            f"{100.0 * float(row[column]) / total_states:.1f}"
+            for column in bucket_columns
+        ]
+        padded_label = f"{label:<5}"
+        rows.append(padded_label + "& " + " & ".join(values) + f" {row_end}")
+    rows.extend(
+        [f"{backslash}bottomrule", f"{backslash}end{{tabular}}"]
+    )
+    table = make_table(
+        "\n".join(rows),
+        f"State out-degree distribution ({backslash}%). Low-degree states remain dominant after generalized construction.",
+        "tab:degree-distribution",
+    )
+    write_text(GENERATED_DIR / "degree_distribution.tex", table)
+
+
+def generate_corpus_scaling_table(
+    scaling_summary: pd.DataFrame,
+    degree_stats: pd.DataFrame,
+) -> None:
+    backslash = chr(92)
+    row_end = backslash * 2
+    rows = [
+        f"{backslash}setlength{{{backslash}tabcolsep}}{{2.7pt}}",
+        f"{backslash}begin{{tabular}}{{rrrrr}}",
+        f"{backslash}toprule",
+        f"Corpus & Memory & Speedup & Accept & Degree 1 {row_end}",
+        f"{backslash}midrule",
+    ]
+    for percentage in CORPUS_PERCENTAGES:
+        result = row_for(scaling_summary, f"gsamd-corpus-{percentage}pct")
+        degree = degree_row(degree_stats, "gsam", percentage)
+        memory = compact_uncertainty_cell(
+            bytes_to_gb(result["memory_mean"]),
+            bytes_to_gb(result["memory_std"]),
+        )
+        speed = compact_uncertainty_cell(result["overall_mean"], result["overall_std"])
+        accept_value = result["accept_overall_mean"]
+        accept = f"{accept_value:.3f}"
+        degree_one = 100.0 * degree["degree_1_states"] / degree["total_states"]
+        corpus_label = f"{percentage}{backslash}%".ljust(6)
+        rows.append(
+            f"{corpus_label}& {memory} & {speed} & {accept} & "
+            f"{degree_one:.1f}{backslash}% {row_end}"
+        )
+    rows.extend(
+        [f"{backslash}bottomrule", f"{backslash}end{{tabular}}"]
+    )
+    table = make_table(
+        "\n".join(rows),
+        "C-SAMD corpus scaling (three runs). Memory is GB; Accept is accepted draft length; Degree 1 is the fraction of single-successor states.",
+        "tab:corpus-scaling",
+    )
+    write_text(GENERATED_DIR / "corpus_scaling.tex", table)
+
+
 def generate_main_table(summary: pd.DataFrame) -> None:
     rows = [
         "\\resizebox{\\columnwidth}{!}{%",
@@ -197,7 +398,7 @@ def generate_main_table(summary: pd.DataFrame) -> None:
     rows.extend(["\\bottomrule", "\\end{tabular}", "}"])
     table = make_table(
         "\n".join(rows),
-        "Memory, overall speedup, and accepted draft length of retrieval-based speculative decoding methods. Speedup is reported as the 3-run mean $\\pm$ standard deviation; accepted length is the mean number of accepted tokens per verification step.",
+        "Memory, overall speedup, and accepted draft length of retrieval-based speculative decoding methods. The dynamic-only row uses no external corpus. Speedup is reported as the 3-run mean $\\pm$ standard deviation; accepted length is the mean number of accepted tokens per verification step.",
         "tab:main-results",
     )
     write_text(GENERATED_DIR / "main_results.tex", table)
@@ -222,7 +423,7 @@ def generate_task_table(summary: pd.DataFrame) -> None:
     rows.extend(["\\bottomrule", "\\end{tabular}", "}"])
     table = make_table(
         "\n".join(rows),
-        "Spec-Bench overall results for retrieval-based speculative decoding methods. Speedup is reported as the 3-run mean $\\pm$ standard deviation; accepted length is the overall mean number of accepted tokens per verification step.",
+        "Spec-Bench overall results for retrieval-based speculative decoding methods. The dynamic-only row uses no external corpus. Speedup is reported as the 3-run mean $\\pm$ standard deviation; accepted length is the overall mean number of accepted tokens per verification step.",
         "tab:task-results",
     )
     write_text(GENERATED_DIR / "task_results.tex", table)
@@ -239,36 +440,45 @@ def generate_ablation_table(summary: pd.DataFrame) -> None:
         "csam-samd-lazy_int32-t1": ("SAM", "lazy + OA", "1"),
         "csam-gsamd-lazy_int32-t1": ("GSAM", "lazy + OA", "1"),
     }
+    backslash = chr(92)
+    row_end = backslash * 2
+    tau_label = f"${backslash}tau$"
     rows = [
-        "\\resizebox{\\textwidth}{!}{%",
-        "\\begin{tabular}{lllcrrr}",
-        "\\toprule",
-        "Variant & Construction & Backing table & $\\tau$ & Memory (GB) & Overall Speedup & Accept Length \\\\",
-        "\\midrule",
+        f"{backslash}begin{{tabular}}{{lllcrrr}}",
+        f"{backslash}toprule",
+        f"Variant & Construction & Transition container & {tau_label} & Memory (GB) & Overall speedup & Accept length {row_end}",
+        f"{backslash}midrule",
     ]
     for name in ABLATION_METHODS:
         row = row_for(summary, name)
-        construction, table, threshold = metadata[name]
+        construction, container, threshold = metadata[name]
         is_best = name == "csam-gsamd-lazy_int32-t1"
-        label = maybe_bold(tex_escape(ABLATION_LABELS[name]), is_best)
+        label = maybe_bold(ABLATION_LABELS[name], is_best)
         construction = maybe_bold(construction, is_best)
-        table = maybe_bold(table, is_best)
+        container = maybe_bold(container, is_best)
         threshold = maybe_bold(threshold, is_best)
-        memory = maybe_bold(f"{bytes_to_gb(row['memory_mean']):.2f}", is_best)
+        memory_mean = row["memory_mean"]
+        memory_value = f"{bytes_to_gb(memory_mean):.2f}"
+        memory = maybe_bold(memory_value, is_best)
         speed = bold_math_cell(speed_cell(row)) if is_best else speed_cell(row)
-        accept = maybe_bold(f"{row['accept_overall_mean']:.3f}", is_best)
+        accept_mean = row["accept_overall_mean"]
+        accept_value = f"{accept_mean:.3f}"
+        accept = maybe_bold(accept_value, is_best)
         rows.append(
-            f"{label} & {construction} & {table} & {threshold} & "
-            f"{memory} & {speed} & {accept} \\\\"
+            f"{label} & {construction} & {container} & {threshold} & "
+            f"{memory} & {speed} & {accept} {row_end}"
         )
-    rows.extend(["\\bottomrule", "\\end{tabular}", "}"])
+    rows.extend([f"{backslash}bottomrule", f"{backslash}end{{tabular}}"])
+    size = f"{backslash}small\n{backslash}setlength{{{backslash}tabcolsep}}{{4.2pt}}"
     table = make_table(
         "\n".join(rows),
-        "Ablation of construction and transition-container choices. STL denotes the standard-library hash table in our systems-level implementation, and OA denotes the Open Addressing hash table used by SuffixDecoding. Overall speedup is reported as the 3-run mean $\\pm$ standard deviation; accepted length is reported as the 3-run mean.",
+        "Full ablation of construction and transition-container choices. STL is the standard-library hash table in the common C++ core; OA is the Open Addressing table used by SuffixDecoding. Speedup is the three-run mean $" + backslash + "pm$ standard deviation and accept length is the three-run mean.",
         "tab:ablation",
         starred=True,
+        size=size,
     )
     write_text(GENERATED_DIR / "ablation_results.tex", table)
+
 
 def generate_eagle_table(eagle: pd.DataFrame) -> None:
     samd = row_for(eagle, "samd-eagle2")
@@ -384,7 +594,7 @@ def generate_lazy_threshold_speedup_table(summary: pd.DataFrame) -> None:
         "Overall speedup for different lazy inline thresholds. Values are reported as 3-run mean $\\pm$ standard deviation.",
         "tab:lazy-threshold-speedup",
         starred=False,
-    ).replace("\\begin{table}[t]", "\\begin{table}[H]", 1)
+    )
     write_text(GENERATED_DIR / "lazy_threshold_speedup.tex", table)
 
 def plot_memory_speed(summary: pd.DataFrame, output: Path, dpi: int, title: str = "Memory-Speed Trade-off") -> None:
@@ -393,7 +603,7 @@ def plot_memory_speed(summary: pd.DataFrame, output: Path, dpi: int, title: str 
     from matplotlib.offsetbox import AnnotationBbox, OffsetImage
     from PIL import Image
 
-    methods = [method for method in MAIN_METHODS if method in set(summary["model"])]
+    methods = [method for method in PLOT_METHODS if method in set(summary["model"])]
     plot_order = [method for method in methods if method != "samd-origin"] + [method for method in methods if method == "samd-origin"]
     colors = {
         "lade-level-5-win-7-guess-7-float16": "#4C78A8",
@@ -508,7 +718,7 @@ def plot_specbench_radar(summary: pd.DataFrame, output: Path, dpi: int) -> None:
     configure_matplotlib()
     import matplotlib.pyplot as plt
 
-    methods = [method for method in MAIN_METHODS if method in set(summary["model"])]
+    methods = [method for method in PLOT_METHODS if method in set(summary["model"])]
     plot_order = [method for method in methods if method != "samd-origin"] + [method for method in methods if method == "samd-origin"]
     keys = [key for key, _ in TASKS]
     base_labels = [label for _, label in TASKS]
@@ -703,40 +913,153 @@ def plot_eagle2_mix(eagle: pd.DataFrame, output: Path, dpi: int) -> None:
     plt.close(fig)
 
 
-def generate_all(root: Path, result_7b: list[Path], result_13b: Path, dpi: int) -> None:
+def generate_all(
+    root: Path,
+    result_7b: list[Path],
+    dynamic_only_results: list[Path],
+    result_13b: Path,
+    degree_stats_path: Path,
+    refresh_degree_stats: bool,
+    degree_index_paths: dict[str, Path],
+    dpi: int,
+    generate_plots: bool,
+) -> None:
+    global PIC_DIR, GENERATED_DIR
+    PIC_DIR = root / "assets"
+    GENERATED_DIR = root / "generated"
+
     summary = summarize_runs(result_7b)
+    scaling_summary = summarize_runs(dynamic_only_results)
+    dynamic_row = scaling_summary.loc[
+        scaling_summary["model"] == "csamd-dynamic-only"
+    ]
+    if dynamic_row.empty:
+        raise KeyError("missing csamd-dynamic-only in dynamic-only result CSV files")
+    summary = pd.concat([summary, dynamic_row], ignore_index=True)
     summary_13b = summarize_runs([result_13b])
-    eagle = summary[summary["model"].isin(["samd-eagle2", "gsamd-eagle2"])].reset_index(drop=True)
+    eagle = summary[
+        summary["model"].isin(["samd-eagle2", "gsamd-eagle2"])
+    ].reset_index(drop=True)
+    degree_stats = (
+        collect_degree_stats(degree_index_paths, degree_stats_path)
+        if refresh_degree_stats
+        else load_degree_stats(degree_stats_path)
+    )
 
     PIC_DIR.mkdir(parents=True, exist_ok=True)
     GENERATED_DIR.mkdir(parents=True, exist_ok=True)
 
     generate_main_table(summary)
     generate_task_table(summary)
+    generate_degree_distribution_table(degree_stats)
     generate_ablation_table(summary)
     generate_eagle_table(eagle)
     generate_13b_table(summary_13b)
     generate_lazy_threshold_accept_table(summary)
     generate_lazy_threshold_speedup_table(summary)
-    plot_memory_speed(summary, PIC_DIR / "retrieval_memory_speed_tradeoff.pdf", dpi, title="Memory-Speed Trade-off on Vicuna-7B")
-    plot_memory_speed(summary_13b, PIC_DIR / "vicuna13b_memory_speed_tradeoff.pdf", dpi, title="Memory-Speed Trade-off on Vicuna-13B")
+    generate_corpus_scaling_table(scaling_summary, degree_stats)
+
+    if not generate_plots:
+        return
+    plot_memory_speed(
+        summary,
+        PIC_DIR / "retrieval_memory_speed_tradeoff.pdf",
+        dpi,
+        title="Memory-Speed Trade-off on Vicuna-7B",
+    )
+    plot_memory_speed(
+        summary_13b,
+        PIC_DIR / "vicuna13b_memory_speed_tradeoff.pdf",
+        dpi,
+        title="Memory-Speed Trade-off on Vicuna-13B",
+    )
     plot_specbench_radar(summary, PIC_DIR / "specbench_task_speedup_radar.pdf", dpi)
     plot_memory_ablation(summary, PIC_DIR / "index_memory_ablation.pdf", dpi)
     plot_lazy_threshold(summary, PIC_DIR / "lazy_threshold_memory.pdf", dpi)
-    plot_eagle2_mix(eagle, PIC_DIR / "eagle2_hybrid_task_speedup_radar.pdf", dpi)
+    plot_eagle2_mix(
+        eagle,
+        PIC_DIR / "eagle2_hybrid_task_speedup_radar.pdf",
+        dpi,
+    )
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Generate paper tables and figures from raw experiment CSV files.")
-    parser.add_argument("--root", type=Path, default=ROOT, help="Paper root for generated tables, figures, and summary CSV outputs.")
-    parser.add_argument("--result-7b", type=Path, nargs=3, default=DEFAULT_7B_RESULTS, metavar=("RUN1", "RUN2", "RUN3"), help="Three raw Vicuna-7B-v1.3 result CSV files.")
-    parser.add_argument("--result-13b", type=Path, default=DEFAULT_13B_RESULT, help="Raw Vicuna-13B-v1.3 result CSV file.")
+    parser = argparse.ArgumentParser(
+        description="Generate paper tables and figures from experiment results."
+    )
+    parser.add_argument(
+        "--root",
+        type=Path,
+        default=ROOT,
+        help="paper root for generated tables and figures",
+    )
+    parser.add_argument(
+        "--result-7b",
+        type=Path,
+        nargs=3,
+        default=DEFAULT_7B_RESULTS,
+        metavar=("RUN1", "RUN2", "RUN3"),
+        help="three Vicuna-7B-v1.3 result CSV files",
+    )
+    parser.add_argument(
+        "--dynamic-only-results",
+        type=Path,
+        nargs=3,
+        default=DEFAULT_DYNAMIC_ONLY_RESULTS,
+        metavar=("RUN1", "RUN2", "RUN3"),
+        help="three CSV files containing dynamic-only and corpus-scaling rows",
+    )
+    parser.add_argument(
+        "--result-13b",
+        type=Path,
+        default=DEFAULT_13B_RESULT,
+        help="Vicuna-13B-v1.3 result CSV file",
+    )
+    parser.add_argument(
+        "--degree-stats",
+        type=Path,
+        default=DEFAULT_DEGREE_STATS,
+        help="cached structural statistics used by degree and corpus tables",
+    )
+    parser.add_argument(
+        "--refresh-degree-stats",
+        action="store_true",
+        help="rescan protobuf indexes and replace --degree-stats",
+    )
+    parser.add_argument(
+        "--degree-index",
+        action="append",
+        default=[],
+        metavar="NAME=PATH",
+        help="override a refresh input: sam-100 or gsam-{1,5,10,50,100}",
+    )
+    parser.add_argument(
+        "--tables-only",
+        action="store_true",
+        help="write all generated TeX tables without regenerating figures",
+    )
     parser.add_argument("--dpi", type=int, default=220)
     args = parser.parse_args()
-    root = args.root.resolve()
-    result_7b = [path if path.is_absolute() else (root / path) for path in args.result_7b]
-    result_13b = args.result_13b if args.result_13b.is_absolute() else (root / args.result_13b)
-    generate_all(root, result_7b, result_13b, args.dpi)
+
+    root = args.root.expanduser().resolve()
+    result_7b = [path.expanduser().resolve() for path in args.result_7b]
+    dynamic_only_results = [
+        path.expanduser().resolve() for path in args.dynamic_only_results
+    ]
+    result_13b = args.result_13b.expanduser().resolve()
+    degree_stats_path = args.degree_stats.expanduser().resolve()
+    degree_index_paths = resolve_degree_indexes(args.degree_index)
+    generate_all(
+        root=root,
+        result_7b=result_7b,
+        dynamic_only_results=dynamic_only_results,
+        result_13b=result_13b,
+        degree_stats_path=degree_stats_path,
+        refresh_degree_stats=args.refresh_degree_stats,
+        degree_index_paths=degree_index_paths,
+        dpi=args.dpi,
+        generate_plots=not args.tables_only,
+    )
 
 
 if __name__ == "__main__":

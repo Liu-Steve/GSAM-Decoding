@@ -14,3 +14,4 @@ sam_data
 *.log
 spec_bench_*/
 generated/
+index_degree_stats.csv

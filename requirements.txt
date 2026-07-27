@@ -1,4 +1,4 @@
-torch>=2.1.1
+torch==2.5.1
 transformers==4.37.1
 accelerate==0.21.0
 fschat==0.2.31
@@ -11,3 +11,11 @@ maturin==0.12
 datasets==3.4.1
 pympler==1.1
 pybind11==3.0.1
+numpy==1.26.4
+pandas==2.3.3
+psutil==7.2.1
+shortuuid==1.0.13
+tqdm==4.67.1
+matplotlib==3.10.8
+pillow==10.4.0
+pytest==9.0.3

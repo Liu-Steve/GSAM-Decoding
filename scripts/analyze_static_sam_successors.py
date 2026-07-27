@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Iterable
 
 
-DEFAULT_INPUT = Path("local_cache/gsamd/static_data_sam.pb")
+DEFAULT_INPUT = Path("local_cache/gsamd/static_data_gsam.pb")
 DEFAULT_OUTPUT_DIR = Path("assets")
 
 WIRE_VARINT = 0
@@ -364,7 +364,7 @@ def main() -> None:
     if not counts:
         raise RuntimeError(f"no states found in {input_path}")
 
-    title = "Frequency Distribution of Successor Counts\nin Suffix Automaton States"
+    title = "Frequency Distribution of Successor Counts\nin Generalized Suffix Automaton States"
     plot_pie(counts, output_path, title, args.top_n, args.dpi)
     print_summary(counts, input_path, args.edge_field, args.count_mode)
     print(f"Pie chart saved to: {output_path}")

@@ -20,7 +20,7 @@ def parse_args():
     parser.add_argument("--cutoff_len", type=int, default=2048)
     parser.add_argument("--n_predicts", type=int, default=40)
     parser.add_argument(
-        "--sam_path", type=str, default="~/program/GSAM-Decoding/local_cache/gsamd"
+        "--sam_path", type=str, default="~/program/GSAM-Decoding/local_cache/gsamd_test"
     )
     parser.add_argument(
         "--use_gsam", action=argparse.BooleanOptionalAction, default=True

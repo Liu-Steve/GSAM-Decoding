@@ -30,8 +30,8 @@ MT_BENCH_CATEGORIES = {
 }
 
 MODEL_SIZE = "7b"
-DEFAULT_DIR = Path(f"./data/spec_bench_{MODEL_SIZE}/model_answer")
-DEFAULT_CSV = Path(f"./data/spec_bench_{MODEL_SIZE}/result.csv")
+DEFAULT_DIR = Path(f"./data/spec_bench_{MODEL_SIZE}_percent_3/model_answer")
+DEFAULT_CSV = Path(f"./data/spec_bench_{MODEL_SIZE}_percent_3/result.csv")
 DEFAULT_TOKENIZER = f"/data/llm/vicuna-{MODEL_SIZE}-v1.3"
 MODEL_PREFIX = f"vicuna-{MODEL_SIZE}-v1.3-"
 
